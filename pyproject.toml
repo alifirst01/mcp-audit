@@ -1,0 +1,28 @@
+[project]
+name = "mcp-audit"
+version = "0.1.0"
+description = "A spec-aligned, extensible security evaluator for MCP servers."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "httpx>=0.27",
+    "rich>=13.0",
+    # Pinned below 1.8: that release deprecates the httpx integration in
+    # favor of an unreleased-elsewhere "httpx2" package.
+    "authlib>=1.7,<1.8",
+]
+
+[project.optional-dependencies]
+yaml = ["pyyaml>=6.0"]
+dev = ["pytest>=8.0", "pyyaml>=6.0"]
+
+[project.scripts]
+mcp-audit = "mcp_audit.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["mcp_audit*"]

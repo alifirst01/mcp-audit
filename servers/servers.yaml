@@ -1,0 +1,7 @@
+# Add servers here; run:  mcp-audit eval-file servers/servers.yaml --out results/
+- name: Supabase MCP (remote)
+  url: https://mcp.supabasse.com/mcp
+- name: Github MCP (remote)
+  url: https://api.githubcopilot.com/mcp
+
+

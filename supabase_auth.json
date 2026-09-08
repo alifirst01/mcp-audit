@@ -1,0 +1,617 @@
+{
+  "name": "Supabase",
+  "url": "https://mcp.supabase.com/mcp",
+  "repo": null,
+  "transport": "http",
+  "category": null,
+  "auth_failure": null,
+  "results": [
+    {
+      "check_id": "discovery-login-required",
+      "rubric_id": "CD-01",
+      "section": "Connection & Discovery",
+      "display_order": 101,
+      "method": "Probe",
+      "title": "Unauthenticated requests are rejected",
+      "rating": "pass",
+      "spec_ref": "MCP Auth \u00a7Overview: servers MUST respond with HTTP 401 Unauthorized when a protected request lacks a valid token \u2014 https://modelcontextprotocol.io/specification/draft/basic/authorization",
+      "detail": "Sent an unauthenticated request to the configured MCP endpoint (https://mcp.supabase.com/mcp) and got HTTP 401 Unauthorized, as an agent would expect before it has logged in.",
+      "evidence": {
+        "status": 401,
+        "endpoint_tested": "https://mcp.supabase.com/mcp"
+      }
+    },
+    {
+      "check_id": "discovery-login-pointer",
+      "rubric_id": "CD-05",
+      "section": "Connection & Discovery",
+      "display_order": 105,
+      "method": "Probe",
+      "title": "401 response includes a resource-metadata pointer",
+      "rating": "pass",
+      "spec_ref": "MCP Auth Discovery \u00a7Protected Resource Metadata: the 401/403 response SHOULD include a resource_metadata link in WWW-Authenticate to bootstrap discovery \u2014 https://modelcontextprotocol.io/specification/draft/basic/authorization/authorization-server-discovery",
+      "detail": "The WWW-Authenticate header on https://mcp.supabase.com/mcp points to a resource metadata document at https://mcp.supabase.com/.well-known/oauth-protected-resource/mcp \u2014 an agent can follow this link to find out how to log in, with no prior knowledge of the server.",
+      "evidence": {
+        "resource_metadata": "https://mcp.supabase.com/.well-known/oauth-protected-resource/mcp",
+        "www_authenticate": "Bearer error=\"invalid_request\", error_description=\"No access token was provided in this request\", resource_metadata=\"https://mcp.supabase.com/.well-known/oauth-protected-resource/mcp\""
+      }
+    },
+    {
+      "check_id": "discovery-authorization-server",
+      "rubric_id": "CD-02",
+      "section": "Connection & Discovery",
+      "display_order": 102,
+      "method": "Probe",
+      "title": "Protected Resource Metadata is published",
+      "rating": "pass",
+      "spec_ref": "MCP Auth Discovery: servers MUST implement RFC 9728 Protected Resource Metadata with an authorization_servers array \u2014 https://modelcontextprotocol.io/specification/draft/basic/authorization/authorization-server-discovery",
+      "detail": "Found a Protected Resource Metadata document at https://mcp.supabase.com/.well-known/oauth-protected-resource/mcp \u2014 it names 1 Authorization Server(s) (https://api.supabase.com) and 13 permission scope(s) advertised: organizations:read, projects:read, projects:write, database:write, database:read, analytics:read.... A scope is a named permission an agent can be granted (e.g. 'read:issues') \u2014 the fewer and narrower the scopes, the less an agent can do if its token leaks.",
+      "evidence": {
+        "url": "https://mcp.supabase.com/.well-known/oauth-protected-resource/mcp",
+        "authorization_servers": [
+          "https://api.supabase.com"
+        ],
+        "scopes_supported": [
+          "organizations:read",
+          "projects:read",
+          "projects:write",
+          "database:write",
+          "database:read",
+          "analytics:read",
+          "secrets:read",
+          "edge_functions:read",
+          "edge_functions:write",
+          "environment:read",
+          "environment:write",
+          "storage:read",
+          "storage:write"
+        ],
+        "bearer_methods_supported": [
+          "header"
+        ]
+      }
+    },
+    {
+      "check_id": "discovery-dual-path",
+      "rubric_id": "CD-06",
+      "section": "Connection & Discovery",
+      "display_order": 106,
+      "method": "Probe",
+      "title": "Metadata is reachable via both discovery paths",
+      "rating": "pass",
+      "spec_ref": "MCP Auth Discovery: clients MUST support both discovery paths; servers SHOULD implement both for maximum client compatibility \u2014 https://modelcontextprotocol.io/specification/draft/basic/authorization/authorization-server-discovery",
+      "detail": "The login-server pointer is reachable both ways: via the WWW-Authenticate header pointer and via the standard /.well-known/oauth-protected-resource path.",
+      "evidence": {
+        "prm_url_from_www_authenticate_header": "https://mcp.supabase.com/.well-known/oauth-protected-resource/mcp",
+        "reachable_via_header_pointer": true,
+        "well_known_url_tried": "https://mcp.supabase.com/.well-known/oauth-protected-resource/mcp",
+        "reachable_via_well_known_path": true
+      }
+    },
+    {
+      "check_id": "oauth-bearer-header-only",
+      "rubric_id": "CT-02",
+      "section": "Credential & Token Risk",
+      "display_order": 302,
+      "method": "Probe",
+      "title": "Access token is transmitted via the Authorization header only",
+      "rating": "pass",
+      "spec_ref": "MCP Auth \u00a7Access Token Usage: tokens MUST be sent in the Authorization: Bearer header and MUST NOT appear in the URI query string \u2014 https://modelcontextprotocol.io/specification/draft/basic/authorization",
+      "detail": "The Protected Resource Metadata advertises 'header' as the only accepted way to send the token (bearer_methods_supported: ['header']).",
+      "evidence": {
+        "bearer_methods_supported": [
+          "header"
+        ]
+      }
+    },
+    {
+      "check_id": "discovery-as-config",
+      "rubric_id": "CD-03",
+      "section": "Connection & Discovery",
+      "display_order": 103,
+      "method": "Probe",
+      "title": "Authorization Server metadata is published",
+      "rating": "pass",
+      "spec_ref": "MCP Auth Discovery \u00a7AS Metadata Discovery: the authorization server MUST provide RFC 8414 or OpenID Connect Discovery metadata \u2014 https://modelcontextprotocol.io/specification/draft/basic/authorization/authorization-server-discovery",
+      "detail": "The login server at https://api.supabase.com publishes its configuration via OAuth Authorization Server Metadata (RFC 8414), fetched from https://api.supabase.com/.well-known/oauth-authorization-server.",
+      "evidence": {
+        "url": "https://api.supabase.com/.well-known/oauth-authorization-server",
+        "variant": "OAuth Authorization Server Metadata (RFC 8414)",
+        "pkce_methods": [
+          "S256",
+          "plain"
+        ],
+        "registration_endpoint": "https://api.supabase.com/platform/oauth/apps/register",
+        "cimd_supported": null
+      }
+    },
+    {
+      "check_id": "discovery-as-config-consistent",
+      "rubric_id": "CD-07",
+      "section": "Connection & Discovery",
+      "display_order": 107,
+      "method": "Probe",
+      "title": "Authorization Server metadata issuer is self-consistent",
+      "rating": "pass",
+      "spec_ref": "MCP Auth Discovery \u00a7AS Metadata (RFC 8414 \u00a73.3 / OIDC \u00a74.3): the issuer in AS metadata MUST equal the issuer identifier used to construct the well-known URL \u2014 https://modelcontextprotocol.io/specification/draft/basic/authorization/authorization-server-discovery",
+      "detail": "The 'issuer' field in the login server's configuration document ('https://api.supabase.com') exactly matches the address it was fetched from, confirming it's the genuine document for this server and not a mismatched copy served from elsewhere.",
+      "evidence": {
+        "expected_issuer": "https://api.supabase.com",
+        "actual_issuer": "https://api.supabase.com",
+        "discovery_url": "https://api.supabase.com/.well-known/oauth-authorization-server"
+      }
+    },
+    {
+      "check_id": "registration-priority",
+      "rubric_id": "CD-04",
+      "section": "Connection & Discovery",
+      "display_order": 104,
+      "method": "Probe",
+      "title": "Client registration mechanism is classified",
+      "rating": "warn",
+      "spec_ref": "MCP Auth Registration: Client ID Metadata Documents are the preferred registration mechanism. Dynamic Client Registration is deprecated and remains available only for backwards compatibility with authorization servers that do not yet support Client ID Metadata Documents \u2014 https://modelcontextprotocol.io/specification/draft/basic/authorization/client-registration",
+      "detail": "Only Dynamic Client Registration is advertised, at https://api.supabase.com/platform/oauth/apps/register. The specification deprecates Dynamic Client Registration in favor of Client ID Metadata Documents, which this login server does not advertise \u2014 a new agent can still register, but only through the deprecated path.",
+      "evidence": {
+        "client_id_metadata_document_supported": false,
+        "registration_endpoint": "https://api.supabase.com/platform/oauth/apps/register"
+      }
+    },
+    {
+      "check_id": "transport-https",
+      "rubric_id": "TR-02",
+      "section": "Transport & Protocol Plumbing",
+      "display_order": 702,
+      "method": "Probe",
+      "title": "Every evaluated endpoint uses HTTPS",
+      "rating": "pass",
+      "spec_ref": "MCP Auth \u00a7Communication Security: remote MCP endpoints and Authorization Server endpoints MUST use TLS \u2014 https://modelcontextprotocol.io/specification/draft/basic/transports/streamable-http",
+      "detail": "All 5 checked endpoint(s) use HTTPS (mcp_endpoint, authorization_endpoint, token_endpoint, registration_endpoint, issuer).",
+      "evidence": {
+        "checked_endpoints": {
+          "mcp_endpoint": "https://mcp.supabase.com/mcp",
+          "authorization_endpoint": "https://api.supabase.com/v1/oauth/authorize",
+          "token_endpoint": "https://api.supabase.com/v1/oauth/token",
+          "registration_endpoint": "https://api.supabase.com/platform/oauth/apps/register",
+          "issuer": "https://api.supabase.com"
+        }
+      }
+    },
+    {
+      "check_id": "oauth-pkce-advertised",
+      "rubric_id": "AA-01",
+      "section": "Authentication & Authorization",
+      "display_order": 201,
+      "method": "Probe",
+      "title": "PKCE (S256) is advertised",
+      "rating": "pass",
+      "spec_ref": "MCP Auth Security \u00a7Authorization Code Protection: PKCE with S256 is REQUIRED; code_challenge_methods_supported MUST include S256 \u2014 https://modelcontextprotocol.io/specification/draft/basic/authorization/security-considerations",
+      "detail": "The login server advertises PKCE with method S256 (methods advertised: ['S256', 'plain']). PKCE (Proof Key for Code Exchange) stops a stolen authorization code from being redeemed by anyone but the agent that started the login.",
+      "evidence": {
+        "methods": [
+          "S256",
+          "plain"
+        ]
+      }
+    },
+    {
+      "check_id": "oauth-scope-surface",
+      "rubric_id": "AA-05",
+      "section": "Authentication & Authorization",
+      "display_order": 205,
+      "method": "Probe",
+      "title": "Advertised scopes are narrowly defined (least privilege)",
+      "rating": "warn",
+      "spec_ref": "MCP Auth Security \u00a7Scope Minimization: scopes SHOULD be granular and operation-specific; overly broad scopes raise blast radius \u2014 https://modelcontextprotocol.io/specification/draft/basic/authorization/security-considerations",
+      "detail": "5 of 13 advertised permission scope(s) look broad or write-capable: projects:write, database:write, edge_functions:write, environment:write, storage:write. If an agent requests the full advertised set, its access could exceed what it actually needs to do its job.",
+      "evidence": {
+        "broad_scopes": [
+          "projects:write",
+          "database:write",
+          "edge_functions:write",
+          "environment:write",
+          "storage:write"
+        ],
+        "all_scopes": [
+          "organizations:read",
+          "projects:read",
+          "projects:write",
+          "database:write",
+          "database:read",
+          "analytics:read",
+          "secrets:read",
+          "edge_functions:read",
+          "edge_functions:write",
+          "environment:read",
+          "environment:write",
+          "storage:read",
+          "storage:write"
+        ]
+      }
+    },
+    {
+      "check_id": "oauth-redirect-uri-rejected",
+      "rubric_id": "AA-02",
+      "section": "Authentication & Authorization",
+      "display_order": 202,
+      "method": "Auth",
+      "title": "Unregistered redirect URIs are rejected",
+      "rating": "na",
+      "spec_ref": "MCP Auth Registration: the AS MUST validate exact redirect URIs, restricting them to localhost/127.0.0.1 or HTTPS, and reject foreign/open-redirect targets \u2014 https://modelcontextprotocol.io/specification/draft/basic/authorization/client-registration",
+      "detail": "Requires an authenticated session; re-run with --auth.",
+      "evidence": {}
+    },
+    {
+      "check_id": "oauth-pkce-enforced",
+      "rubric_id": "AA-03",
+      "section": "Authentication & Authorization",
+      "display_order": 203,
+      "method": "Auth",
+      "title": "PKCE is enforced",
+      "rating": "na",
+      "spec_ref": "MCP Auth Security \u00a7Authorization Code Protection: PKCE MUST be enforced; an auth request with no valid code_challenge MUST be rejected \u2014 https://modelcontextprotocol.io/specification/draft/basic/authorization/security-considerations",
+      "detail": "Requires an authenticated session; re-run with --auth.",
+      "evidence": {}
+    },
+    {
+      "check_id": "oauth-resource-bound",
+      "rubric_id": "CT-01",
+      "section": "Credential & Token Risk",
+      "display_order": 301,
+      "method": "Auth",
+      "title": "Access token is bound to this resource (audience binding)",
+      "rating": "na",
+      "spec_ref": "MCP Auth Security: servers MUST support the resource parameter (RFC 8707) and issue tokens whose audience is bound to the canonical server URI \u2014 https://modelcontextprotocol.io/specification/draft/basic/authorization/security-considerations",
+      "detail": "Requires an authenticated session; re-run with --auth.",
+      "evidence": {}
+    },
+    {
+      "check_id": "oauth-issuer-response-valid",
+      "rubric_id": "AA-04",
+      "section": "Authentication & Authorization",
+      "display_order": 204,
+      "method": "Auth",
+      "title": "Authorization response issuer is validated",
+      "rating": "na",
+      "spec_ref": "MCP Auth \u00a7Overview / RFC 9207: the authorization response MUST carry iss; it MUST match the AS issuer before the code is exchanged \u2014 https://modelcontextprotocol.io/specification/draft/basic/authorization",
+      "detail": "Requires an authenticated session; re-run with --auth.",
+      "evidence": {}
+    },
+    {
+      "check_id": "oauth-token-integrity",
+      "rubric_id": "CT-03",
+      "section": "Credential & Token Risk",
+      "display_order": 303,
+      "method": "Auth",
+      "title": "Token integrity is verified (tampered-token rejection)",
+      "rating": "na",
+      "spec_ref": "MCP Auth \u00a7Overview: servers MUST validate access tokens on every request; a token that fails verification MUST be rejected \u2014 https://modelcontextprotocol.io/specification/draft/basic/authorization",
+      "detail": "Requires an authenticated session; re-run with --auth.",
+      "evidence": {}
+    },
+    {
+      "check_id": "oauth-token-checked-every-request",
+      "rubric_id": "CT-04",
+      "section": "Credential & Token Risk",
+      "display_order": 304,
+      "method": "Auth",
+      "title": "Invalid or expired tokens are rejected on every request",
+      "rating": "na",
+      "spec_ref": "MCP Auth \u00a7Overview: invalid or expired tokens MUST receive HTTP 401; no protected resource is served without a verified token \u2014 https://modelcontextprotocol.io/specification/draft/basic/authorization",
+      "detail": "Requires an authenticated session; re-run with --auth.",
+      "evidence": {}
+    },
+    {
+      "check_id": "oauth-short-lived-refresh",
+      "rubric_id": "CT-05",
+      "section": "Credential & Token Risk",
+      "display_order": 305,
+      "method": "Auth",
+      "title": "Access tokens are short-lived and refresh tokens rotate",
+      "rating": "na",
+      "spec_ref": "MCP Auth Security \u00a7Token Lifetime: access tokens SHOULD be short-lived (the specification does not name an exact duration); refresh tokens SHOULD rotate on each use for public clients \u2014 https://modelcontextprotocol.io/specification/draft/basic/authorization/security-considerations",
+      "detail": "Requires an authenticated session; re-run with --auth.",
+      "evidence": {}
+    },
+    {
+      "check_id": "transport-foreign-origin-rejected",
+      "rubric_id": "TR-01",
+      "section": "Transport & Protocol Plumbing",
+      "display_order": 701,
+      "method": "Probe",
+      "title": "Requests with a foreign `Origin` header are rejected",
+      "rating": "na",
+      "spec_ref": "MCP Streamable HTTP \u00a7Security: servers MUST validate the Origin header on all incoming connections; invalid origins MUST receive HTTP 403 \u2014 https://modelcontextprotocol.io/specification/draft/basic/transports/streamable-http",
+      "detail": "The baseline request was rejected at the auth layer (HTTP 401) before reaching the logic this check tests, so there is nothing to compare the mutation against. Re-run with --auth.",
+      "evidence": {
+        "used_auth": false,
+        "baseline_no_origin": {
+          "request_method": "POST",
+          "request_url": "https://mcp.supabase.com/mcp",
+          "request_headers": {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": "2026-07-28",
+            "Mcp-Method": "tools/list"
+          },
+          "request_body": {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {
+              "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {}
+              }
+            }
+          },
+          "response_status": 401,
+          "response_body": "{\"message\":\"Unauthorized\"}"
+        },
+        "baseline_legit_origin": {
+          "request_method": "POST",
+          "request_url": "https://mcp.supabase.com/mcp",
+          "request_headers": {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": "2026-07-28",
+            "Mcp-Method": "tools/list",
+            "Origin": "https://mcp.supabase.com"
+          },
+          "request_body": {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {
+              "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {}
+              }
+            }
+          },
+          "response_status": 401,
+          "response_body": "{\"message\":\"Unauthorized\"}"
+        },
+        "mutated_foreign_origin": {
+          "request_method": "POST",
+          "request_url": "https://mcp.supabase.com/mcp",
+          "request_headers": {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": "2026-07-28",
+            "Mcp-Method": "tools/list",
+            "Origin": "http://evil.attacker.example.com"
+          },
+          "request_body": {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {
+              "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {}
+              }
+            }
+          },
+          "response_status": 401,
+          "response_body": "{\"message\":\"Unauthorized\"}"
+        }
+      }
+    },
+    {
+      "check_id": "transport-version-header-enforced",
+      "rubric_id": "TR-04",
+      "section": "Transport & Protocol Plumbing",
+      "display_order": 704,
+      "method": "Probe",
+      "title": "Mismatched protocol-version header is rejected",
+      "rating": "na",
+      "spec_ref": "MCP Streamable HTTP \u00a7Protocol Version Header: a MCP-Protocol-Version header that disagrees with the body's declared version MUST yield 400 Bad Request + HeaderMismatch (-32020). (A header that is simply absent may be tolerated for backward compatibility with pre-2025-06-18 clients \u2014 that case is intentionally not tested here.) \u2014 https://modelcontextprotocol.io/specification/draft/basic/transports/streamable-http",
+      "detail": "The baseline request was rejected at the auth layer (HTTP 401) before reaching the logic this check tests, so there is nothing to compare the mutation against. Re-run with --auth.",
+      "evidence": {
+        "used_auth": false,
+        "baseline": {
+          "request_method": "POST",
+          "request_url": "https://mcp.supabase.com/mcp",
+          "request_headers": {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": "2026-07-28",
+            "Mcp-Method": "tools/list"
+          },
+          "request_body": {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {
+              "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {}
+              }
+            }
+          },
+          "response_status": 401,
+          "response_body": "{\"message\":\"Unauthorized\"}"
+        },
+        "mutated": {
+          "request_method": "POST",
+          "request_url": "https://mcp.supabase.com/mcp",
+          "request_headers": {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": "2099-01-01",
+            "Mcp-Method": "tools/list"
+          },
+          "request_body": {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {
+              "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {}
+              }
+            }
+          },
+          "response_status": 401,
+          "response_body": "{\"message\":\"Unauthorized\"}"
+        }
+      }
+    },
+    {
+      "check_id": "transport-header-body-consistency",
+      "rubric_id": "TR-05",
+      "section": "Transport & Protocol Plumbing",
+      "display_order": 705,
+      "method": "Probe",
+      "title": "Header/body mismatches are rejected",
+      "rating": "na",
+      "spec_ref": "MCP Streamable HTTP \u00a7Server Validation: header/body mismatch MUST yield 400 Bad Request + HeaderMismatch (-32020) \u2014 https://modelcontextprotocol.io/specification/draft/basic/transports/streamable-http",
+      "detail": "The baseline request was rejected at the auth layer (HTTP 401) before reaching the logic this check tests, so there is nothing to compare the mutation against. Re-run with --auth.",
+      "evidence": {
+        "used_auth": false,
+        "baseline": {
+          "request_method": "POST",
+          "request_url": "https://mcp.supabase.com/mcp",
+          "request_headers": {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": "2026-07-28",
+            "Mcp-Method": "tools/list"
+          },
+          "request_body": {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {
+              "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {}
+              }
+            }
+          },
+          "response_status": 401,
+          "response_body": "{\"message\":\"Unauthorized\"}"
+        },
+        "mutated": {
+          "request_method": "POST",
+          "request_url": "https://mcp.supabase.com/mcp",
+          "request_headers": {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": "2026-07-28",
+            "Mcp-Method": "resources/read"
+          },
+          "request_body": {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {
+              "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {}
+              }
+            }
+          },
+          "response_status": 401,
+          "response_body": "{\"message\":\"Unauthorized\"}"
+        }
+      }
+    },
+    {
+      "check_id": "transport-unsupported-version-error",
+      "rubric_id": "TR-08",
+      "section": "Transport & Protocol Plumbing",
+      "display_order": 708,
+      "method": "Probe",
+      "title": "Unsupported protocol versions are rejected with a supported-version list",
+      "rating": "na",
+      "spec_ref": "MCP Versioning \u00a7Protocol Version Negotiation: if the server does not implement the requested version it MUST respond with UnsupportedProtocolVersionError (-32022) listing supported versions in data.supported \u2014 https://modelcontextprotocol.io/specification/draft/basic/versioning",
+      "detail": "The baseline request was rejected at the auth layer (HTTP 401) before reaching the logic this check tests, so there is nothing to compare the mutation against. Re-run with --auth.",
+      "evidence": {
+        "used_auth": false,
+        "baseline": {
+          "request_method": "POST",
+          "request_url": "https://mcp.supabase.com/mcp",
+          "request_headers": {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": "2026-07-28",
+            "Mcp-Method": "tools/list"
+          },
+          "request_body": {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {
+              "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {}
+              }
+            }
+          },
+          "response_status": 401,
+          "response_body": "{\"message\":\"Unauthorized\"}"
+        },
+        "mutated": {
+          "request_method": "POST",
+          "request_url": "https://mcp.supabase.com/mcp",
+          "request_headers": {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": "1900-01-01",
+            "Mcp-Method": "tools/list"
+          },
+          "request_body": {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {
+              "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "1900-01-01",
+                "io.modelcontextprotocol/clientCapabilities": {}
+              }
+            }
+          },
+          "response_status": 401,
+          "response_body": "{\"message\":\"Unauthorized\"}"
+        }
+      }
+    },
+    {
+      "check_id": "tool-blast-radius",
+      "rubric_id": "TS-01",
+      "section": "Tool Safety & Blast Radius",
+      "display_order": 401,
+      "method": "Auth",
+      "title": "No unrestricted-access tools are present",
+      "rating": "na",
+      "spec_ref": "Least Privilege: tools SHOULD be narrowly scoped; catch-all tools (raw SQL execution, arbitrary shell, unrestricted HTTP) are flagged as high blast-radius.",
+      "detail": "tools/list requires authentication; re-run with --auth to inspect it.",
+      "evidence": {}
+    },
+    {
+      "check_id": "tool-rw-separation",
+      "rubric_id": "TS-02",
+      "section": "Tool Safety & Blast Radius",
+      "display_order": 402,
+      "method": "Auth",
+      "title": "Read and write operations are distinguishable",
+      "rating": "na",
+      "spec_ref": "Least Privilege: write/destructive tools SHOULD be clearly distinguished from read-only tools, either via naming convention, annotation (readOnlyHint), or separate toolsets.",
+      "detail": "tools/list requires authentication; re-run with --auth to inspect it.",
+      "evidence": {}
+    },
+    {
+      "check_id": "tool-injection-surface",
+      "rubric_id": "TS-03",
+      "section": "Tool Safety & Blast Radius",
+      "display_order": 403,
+      "method": "Auth",
+      "title": "Tools with an external-content injection surface are identifiable",
+      "rating": "na",
+      "spec_ref": "Prompt-Injection Blast Radius: tools that fetch untrusted external content (web pages, user-supplied URLs, external queries) SHOULD be identified and their injection surface documented.",
+      "detail": "tools/list requires authentication; re-run with --auth to inspect it.",
+      "evidence": {}
+    }
+  ]
+}
