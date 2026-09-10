@@ -44,6 +44,7 @@ See docs/METHODOLOGY.md "How the OAuth flow works" for the full writeup.
 from __future__ import annotations
 
 import http.server
+import json as _json
 import secrets
 import threading
 import urllib.parse
@@ -57,9 +58,27 @@ from authlib.oauth2.auth import ClientAuth
 from authlib.oauth2.rfc6749.parameters import prepare_token_request
 from authlib.oauth2.rfc7636 import create_s256_code_challenge
 
-from .probe import AuthFailure, AuthSession, ProbeContext
+from .probe import AuthFailure, AuthSession, ProbeContext, debug_log, debug_tokens_enabled
 
 LOOPBACK_TIMEOUT_SECONDS = 120
+
+
+def _debug_token_response(stage: str, endpoint: str, doc, chosen: str) -> None:
+    """Local, UNREDACTED dump of a token-endpoint response — only when
+    MCP_AUDIT_DEBUG_TOKENS is set. Shows the full JSON (real token values),
+    which field mcp-audit takes as the bearer, and whether that value is
+    non-empty at send time. Never written to evidence/report files."""
+    if not debug_tokens_enabled():
+        return
+    keys = sorted(doc) if isinstance(doc, dict) else f"<not a JSON object: {type(doc).__name__}>"
+    debug_log(f"{stage}: {endpoint}")
+    debug_log(f"{stage}: response keys = {keys}")
+    debug_log(f"{stage}: full response JSON = {_json.dumps(doc) if isinstance(doc, dict) else doc!r}")
+    debug_log(
+        f"{stage}: bearer is taken from the 'access_token' field ONLY "
+        f"(not id_token / refresh_token / raw body); "
+        f"value={chosen!r} len={len(chosen)} empty={not chosen.strip()}"
+    )
 
 # RFC 7636 requires 43-128 characters; comfortably within range.
 _PKCE_VERIFIER_LENGTH = 48
@@ -294,13 +313,22 @@ def exchange_code(
             f"{r.status or r.error}: {r.text[:300]}"
         )
     doc = r.json()
-    access_token = doc.get("access_token")
+    # The bearer is the `access_token` field, and only that field — never
+    # id_token, never refresh_token, never the raw response. Strip stray
+    # whitespace/newlines a sloppy server might wrap it in.
+    access_token = (doc.get("access_token") or "").strip() if isinstance(doc, dict) else ""
+    _debug_token_response("token-exchange", token_endpoint, doc, access_token)
     if not access_token:
-        raise RuntimeError(f"Token response from {token_endpoint} carried no access_token.")
+        present = sorted(doc) if isinstance(doc, dict) else type(doc).__name__
+        raise RuntimeError(
+            f"Token response from {token_endpoint} has no usable 'access_token' "
+            f"(fields present: {present}). mcp-audit will not fall back to "
+            f"id_token or refresh_token."
+        )
     return AuthSession(
         access_token=access_token,
-        token_type=doc.get("token_type", "Bearer"),
-        refresh_token=doc.get("refresh_token"),
+        token_type=(doc.get("token_type") or "Bearer"),
+        refresh_token=doc.get("refresh_token") or None,
         expires_in=doc.get("expires_in"),
         scope=doc.get("scope"),
         requested_scope=requested_scope,
@@ -327,16 +355,28 @@ def refresh(ctx: ProbeContext, as_metadata: dict, client: ClientCredentials,
             f"Refresh failed: POST {token_endpoint} -> {r.status or r.error}: {r.text[:300]}"
         )
     doc = r.json()
+    # `.get(key, fallback)` is wrong here: a refresh response that includes
+    # `"access_token": ""` (or null) would then *store the empty value*,
+    # poisoning the session with a blank bearer. Use `or` so any falsy field
+    # falls back to the still-valid current value.
+    new_access = (doc.get("access_token") or "").strip() if isinstance(doc, dict) else ""
+    new_refresh = (doc.get("refresh_token") or "") or None
+    _debug_token_response("token-refresh", token_endpoint, doc, new_access)
+    rotated = bool(new_refresh) and new_refresh != session.refresh_token
     return AuthSession(
-        access_token=doc.get("access_token", session.access_token),
-        token_type=doc.get("token_type", session.token_type),
-        refresh_token=doc.get("refresh_token", session.refresh_token),
+        access_token=new_access or session.access_token,
+        token_type=(doc.get("token_type") or session.token_type),
+        refresh_token=new_refresh or session.refresh_token,
         expires_in=doc.get("expires_in"),
-        scope=doc.get("scope", session.scope),
+        scope=(doc.get("scope") or session.scope),
         requested_scope=session.requested_scope,
         issuer=session.issuer,
         resource=session.resource,
-        probe_evidence={**session.probe_evidence, "refresh_rotated_token": doc.get("refresh_token") != session.refresh_token},
+        probe_evidence={
+            **session.probe_evidence,
+            "refresh_rotated_token": rotated,
+            "refresh_returned_new_access_token": bool(new_access),
+        },
     )
 
 
@@ -470,6 +510,28 @@ def authenticate(target, ctx: ProbeContext, auth_input: Optional[AuthInput] = No
         session.probe_evidence["pkce_challenge"] = challenge
         ctx.auth_session = session
         print(f"  Authorized.\n")
+        _debug_fresh_token_sanity_get(ctx, target)
 
     except Exception as e:
         ctx.auth_failure = AuthFailure(reason=str(e), stage="flow")
+
+
+def _debug_fresh_token_sanity_get(ctx: ProbeContext, target) -> None:
+    """Right after the token is issued (before any check has run), do one
+    plain authenticated GET with it and log the result UNREDACTED — only when
+    MCP_AUDIT_DEBUG_TOKENS is set. This isolates "the issued token is bad" (this
+    GET is 401) from "a later probe spent/tampered it" (this GET is fine but
+    checks fail afterwards)."""
+    if not debug_tokens_enabled() or not target.url:
+        return
+    try:
+        g = ctx.get(target.url, headers=ctx.authed_headers(
+            {"Accept": "application/json, text/event-stream"}))
+        debug_log(
+            f"fresh-token sanity GET {target.url} -> {g.status} "
+            f"{(g.text or '')[:200]!r}  "
+            f"(non-401 => the issued token is accepted; 401 => the token "
+            f"itself is being rejected at issuance)"
+        )
+    except Exception as e:
+        debug_log(f"fresh-token sanity GET raised: {e!r}")

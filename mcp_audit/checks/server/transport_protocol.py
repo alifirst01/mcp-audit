@@ -24,12 +24,12 @@ from ...core.base import Check, register
 from ...core.models import Rating, SpecLevel
 from ...core.probe import ProbeContext
 from ._helpers import (
+    accepted_async,
     base_url,
     extract_jsonrpc_error,
-    maybe_authed_headers,
-    mcp_post_headers,
-    probe_reaches_property_stage,
+    mcp_message_target,
     request_evidence,
+    sse_async_na,
     tools_list_body,
 )
 
@@ -72,21 +72,23 @@ class ForeignOriginRejected(Check):
         if not target.url:
             return self._result(Rating.NA, "No URL to test.")
 
-        body = tools_list_body()
-        base_headers, used_auth = maybe_authed_headers(ctx, mcp_post_headers(method="tools/list"))
-        legit_origin = base_url(target.url)
+        probe_url, base_headers, used_auth, session = mcp_message_target(target, ctx)
+        body = tools_list_body(version=session.protocol_version)
+        legit_origin = base_url(probe_url)
         evil_headers = {**base_headers, "Origin": self._EVIL_ORIGIN}
         legit_headers = {**base_headers, "Origin": legit_origin}
 
-        r_no_origin = ctx.post(target.url, json_body=body, headers=base_headers)
-        r_legit = ctx.post(target.url, json_body=body, headers=legit_headers)
-        r_evil = ctx.post(target.url, json_body=body, headers=evil_headers)
+        r_no_origin = ctx.post(probe_url, json_body=body, headers=base_headers)
+        r_legit = ctx.post(probe_url, json_body=body, headers=legit_headers)
+        r_evil = ctx.post(probe_url, json_body=body, headers=evil_headers)
 
         evidence = {
             "used_auth": used_auth,
-            "baseline_no_origin": request_evidence("POST", target.url, base_headers, body, r_no_origin),
-            "baseline_legit_origin": request_evidence("POST", target.url, legit_headers, body, r_legit),
-            "mutated_foreign_origin": request_evidence("POST", target.url, evil_headers, body, r_evil),
+            "mcp_session": {"message_url": probe_url, "initialized": session.initialized,
+                            "protocol_version": session.protocol_version, "error": session.error},
+            "baseline_no_origin": request_evidence("POST", probe_url, base_headers, body, r_no_origin),
+            "baseline_legit_origin": request_evidence("POST", probe_url, legit_headers, body, r_legit),
+            "mutated_foreign_origin": request_evidence("POST", probe_url, evil_headers, body, r_evil),
         }
 
         if r_no_origin.error or r_legit.error or r_evil.error:
@@ -97,28 +99,33 @@ class ForeignOriginRejected(Check):
                 evidence,
             )
 
+        if accepted_async(r_no_origin, r_legit, r_evil):
+            return sse_async_na(self, evidence)
+
+        # Baseline: a request with no hostile Origin, using the exact
+        # tools/list shape proven to work elsewhere in this run. Prefer the
+        # no-Origin probe and fall back to the legit-Origin one; either must
+        # reach a 2xx success for the foreign-Origin comparison to isolate
+        # Origin validation rather than some earlier rejection.
         reference, reference_label = None, None
         for candidate, label in ((r_no_origin, "no Origin header"), (r_legit, f"Origin: {legit_origin}")):
-            if probe_reaches_property_stage(candidate):
+            if 200 <= candidate.status < 300:
                 reference, reference_label = candidate, label
                 break
 
         if reference is None:
             return self._result(
-                Rating.ERROR,
-                f"Even a request with no hostile Origin header was rejected "
-                f"at the request-validation stage (HTTP 400 for both a "
-                f"missing Origin and Origin: {legit_origin}), using the "
-                f"exact tools/list request shape proven to work elsewhere "
-                f"in this run — so Origin behavior can't be isolated from "
-                f"this earlier rejection. Not tested; see evidence for the "
-                f"full requests and responses.",
+                Rating.NA,
+                f"Neither baseline request reached a 2xx success status (no "
+                f"Origin header: HTTP {r_no_origin.status}; Origin: "
+                f"{legit_origin}: HTTP {r_legit.status}), so the request never "
+                f"reached the Origin-validation logic this check tests and "
+                f"there is nothing for the foreign-Origin variant to be "
+                f"compared against. Not tested"
+                + ("." if used_auth else "; re-run with --auth.")
+                + " See evidence for the full requests and responses.",
                 evidence,
             )
-
-        na = self.baseline_gate(reference, evidence)
-        if na:
-            return na
 
         if r_evil.status == 403:
             return self._result(
@@ -259,17 +266,19 @@ class VersionHeaderEnforced(Check):
         if not target.url:
             return self._result(Rating.NA, "No URL to test.")
 
-        body = tools_list_body()
-        base_headers, used_auth = maybe_authed_headers(ctx, mcp_post_headers(method="tools/list"))
+        probe_url, base_headers, used_auth, session = mcp_message_target(target, ctx)
+        body = tools_list_body(version=session.protocol_version)
         mutated_headers = {**base_headers, "MCP-Protocol-Version": self._MISMATCHED_VERSION}
 
-        r_baseline = ctx.post(target.url, json_body=body, headers=base_headers)
-        r_mutated = ctx.post(target.url, json_body=body, headers=mutated_headers)
+        r_baseline = ctx.post(probe_url, json_body=body, headers=base_headers)
+        r_mutated = ctx.post(probe_url, json_body=body, headers=mutated_headers)
 
         evidence = {
             "used_auth": used_auth,
-            "baseline": request_evidence("POST", target.url, base_headers, body, r_baseline),
-            "mutated": request_evidence("POST", target.url, mutated_headers, body, r_mutated),
+            "mcp_session": {"message_url": probe_url, "initialized": session.initialized,
+                            "protocol_version": session.protocol_version, "error": session.error},
+            "baseline": request_evidence("POST", probe_url, base_headers, body, r_baseline),
+            "mutated": request_evidence("POST", probe_url, mutated_headers, body, r_mutated),
         }
 
         if r_baseline.error or r_mutated.error:
@@ -280,17 +289,13 @@ class VersionHeaderEnforced(Check):
                 evidence,
             )
 
-        if not probe_reaches_property_stage(r_baseline):
-            return self._result(
-                Rating.ERROR,
-                f"The baseline request — a matching MCP-Protocol-Version "
-                f"header and body, using the exact tools/list shape proven "
-                f"to work elsewhere in this run — itself got HTTP 400, so "
-                f"header/body version-mismatch behavior can't be isolated "
-                f"from this earlier rejection. Not tested; see evidence.",
-                evidence,
-            )
+        if accepted_async(r_baseline, r_mutated):
+            return sse_async_na(self, evidence)
 
+        # The baseline uses a matching MCP-Protocol-Version header and body —
+        # the exact tools/list shape proven to work elsewhere in this run. If
+        # even that doesn't reach a 2xx, header/body version-mismatch behavior
+        # can't be isolated from the earlier rejection.
         na = self.baseline_gate(r_baseline, evidence)
         if na:
             return na
@@ -364,17 +369,19 @@ class HeaderBodyConsistency(Check):
         if not target.url:
             return self._result(Rating.NA, "No URL to test.")
 
-        body = tools_list_body()
-        base_headers, used_auth = maybe_authed_headers(ctx, mcp_post_headers(method="tools/list"))
+        probe_url, base_headers, used_auth, session = mcp_message_target(target, ctx)
+        body = tools_list_body(version=session.protocol_version)
         mutated_headers = {**base_headers, "Mcp-Method": self._MISMATCHED_METHOD}
 
-        r_baseline = ctx.post(target.url, json_body=body, headers=base_headers)
-        r_mutated = ctx.post(target.url, json_body=body, headers=mutated_headers)
+        r_baseline = ctx.post(probe_url, json_body=body, headers=base_headers)
+        r_mutated = ctx.post(probe_url, json_body=body, headers=mutated_headers)
 
         evidence = {
             "used_auth": used_auth,
-            "baseline": request_evidence("POST", target.url, base_headers, body, r_baseline),
-            "mutated": request_evidence("POST", target.url, mutated_headers, body, r_mutated),
+            "mcp_session": {"message_url": probe_url, "initialized": session.initialized,
+                            "protocol_version": session.protocol_version, "error": session.error},
+            "baseline": request_evidence("POST", probe_url, base_headers, body, r_baseline),
+            "mutated": request_evidence("POST", probe_url, mutated_headers, body, r_mutated),
         }
 
         if r_baseline.error or r_mutated.error:
@@ -385,17 +392,13 @@ class HeaderBodyConsistency(Check):
                 evidence,
             )
 
-        if not probe_reaches_property_stage(r_baseline):
-            return self._result(
-                Rating.ERROR,
-                f"The baseline request — Mcp-Method: tools/list matching a "
-                f"tools/list body, the exact shape proven to work elsewhere "
-                f"in this run — itself got HTTP 400, so header/body "
-                f"method-mismatch behavior can't be isolated from this "
-                f"earlier rejection. Not tested; see evidence.",
-                evidence,
-            )
+        if accepted_async(r_baseline, r_mutated):
+            return sse_async_na(self, evidence)
 
+        # The baseline sends Mcp-Method: tools/list matching a tools/list body
+        # — the exact shape proven to work elsewhere in this run. If even that
+        # doesn't reach a 2xx, header/body method-mismatch behavior can't be
+        # isolated from the earlier rejection.
         na = self.baseline_gate(r_baseline, evidence)
         if na:
             return na
@@ -475,18 +478,20 @@ class UnsupportedVersionError(Check):
         if not target.url:
             return self._result(Rating.NA, "No URL to test.")
 
-        real_body = tools_list_body()
-        base_headers, used_auth = maybe_authed_headers(ctx, mcp_post_headers(method="tools/list"))
-        r_baseline = ctx.post(target.url, json_body=real_body, headers=base_headers)
+        probe_url, base_headers, used_auth, session = mcp_message_target(target, ctx)
+        real_body = tools_list_body(version=session.protocol_version)
+        r_baseline = ctx.post(probe_url, json_body=real_body, headers=base_headers)
 
         bogus_body = tools_list_body(version=self._BOGUS_VERSION)
         bogus_headers = {**base_headers, "MCP-Protocol-Version": self._BOGUS_VERSION}
-        r_mutated = ctx.post(target.url, json_body=bogus_body, headers=bogus_headers)
+        r_mutated = ctx.post(probe_url, json_body=bogus_body, headers=bogus_headers)
 
         evidence = {
             "used_auth": used_auth,
-            "baseline": request_evidence("POST", target.url, base_headers, real_body, r_baseline),
-            "mutated": request_evidence("POST", target.url, bogus_headers, bogus_body, r_mutated),
+            "mcp_session": {"message_url": probe_url, "initialized": session.initialized,
+                            "protocol_version": session.protocol_version, "error": session.error},
+            "baseline": request_evidence("POST", probe_url, base_headers, real_body, r_baseline),
+            "mutated": request_evidence("POST", probe_url, bogus_headers, bogus_body, r_mutated),
         }
 
         if r_baseline.error or r_mutated.error:
@@ -497,18 +502,14 @@ class UnsupportedVersionError(Check):
                 evidence,
             )
 
-        if not probe_reaches_property_stage(r_baseline):
-            return self._result(
-                Rating.ERROR,
-                f"The baseline request — the real, current protocol version "
-                f"consistently in both header and body, using the exact "
-                f"tools/list shape proven to work elsewhere in this run — "
-                f"itself got HTTP 400, so version-negotiation behavior "
-                f"can't be isolated from this earlier rejection. Not "
-                f"tested; see evidence.",
-                evidence,
-            )
+        if accepted_async(r_baseline, r_mutated):
+            return sse_async_na(self, evidence)
 
+        # The baseline sends the real, current protocol version consistently
+        # in both header and body — the exact tools/list shape proven to work
+        # elsewhere in this run. If even that doesn't reach a 2xx,
+        # version-negotiation behavior can't be isolated from the earlier
+        # rejection.
         na = self.baseline_gate(r_baseline, evidence)
         if na:
             return na

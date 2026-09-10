@@ -49,22 +49,38 @@ class Check(ABC):
         raise NotImplementedError
 
     def baseline_gate(self, response, evidence: dict) -> CheckResult | None:
-        """Guard for differential (baseline-vs-mutation) checks: if the
-        baseline itself was rejected at the auth layer (401/403), the auth
-        gate fired before the logic under test ever ran, so a mutation that
-        gets the same status proves nothing. Returns an NA result in that
-        case; returns None when the baseline reached the tested logic and
-        the check should proceed to compare baseline vs. mutation."""
-        if response.status in (401, 403):
-            return self._result(
-                Rating.NA,
-                f"The baseline request was rejected at the auth layer (HTTP "
-                f"{response.status}) before reaching the logic this check "
-                f"tests, so there is nothing to compare the mutation "
-                f"against. Re-run with --auth.",
-                evidence,
+        """Guard for differential (baseline-vs-mutation) checks: the mutation
+        comparison only means something if the baseline request actually
+        reached the behavior under test, and that means a 2xx success.
+
+        Any non-2xx baseline — a 401/403 auth challenge, a 404/405 wrong
+        route or method, a 400 malformed request, a 3xx redirect — means the
+        request was turned away at an earlier stage, so a mutation that
+        reaches the same status proves nothing. A 202 is 2xx but carries no
+        response body (the reply is on a separate SSE stream), so it can't be
+        compared either. In any of these cases this returns an NA result
+        naming the actual baseline status; it returns None (proceed to
+        compare) only for a 2xx-with-body success. Network-level failures are
+        the caller's to handle via `response.error` before calling this."""
+        if 200 <= response.status < 300 and response.status != 202:
+            return None
+        if response.status == 202:
+            tail = (
+                " The response is delivered on a separate SSE stream this "
+                "probe does not consume. SSE async response not captured."
             )
-        return None
+        elif response.status in (401, 403):
+            tail = " Re-run with --auth."
+        else:
+            tail = " See evidence for the full request and response."
+        return self._result(
+            Rating.NA,
+            f"The baseline request did not reach a usable 2xx success status "
+            f"(HTTP {response.status}), so it never reached the behavior this "
+            f"check tests and there is nothing for the mutation to be compared "
+            f"against. Not tested." + tail,
+            evidence,
+        )
 
     def _result(self, rating, detail="", evidence=None) -> CheckResult:
         return CheckResult(

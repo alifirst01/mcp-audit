@@ -10,11 +10,26 @@ authenticated requests all flow through this shared client.
 from __future__ import annotations
 
 import json as _json
+import os
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Optional
 
 import httpx
+
+
+def debug_tokens_enabled() -> bool:
+    """True when MCP_AUDIT_DEBUG_TOKENS is set — turns on *local, unredacted*
+    logging of token-endpoint responses and outgoing Authorization headers to
+    stderr, for diagnosing why an issued token is rejected. Off by default;
+    never affects evidence written to disk (that stays redacted)."""
+    return os.environ.get("MCP_AUDIT_DEBUG_TOKENS", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def debug_log(msg: str) -> None:
+    if debug_tokens_enabled():
+        print(f"[MCP_AUDIT_DEBUG_TOKENS] {msg}", file=sys.stderr, flush=True)
 
 
 @dataclass
@@ -68,6 +83,10 @@ class ProbeContext:
     auth_session: Optional[AuthSession] = None
     auth_failure: Optional[AuthFailure] = None
     transport: Optional[httpx.BaseTransport] = None
+    # Request/response evidence for the most recent tools/list attempt, set by
+    # _helpers.fetch_tools / fetch_tools_authed so a check that only gets an
+    # error string back can still show the exact request and the server's reply.
+    last_tools_list_evidence: Optional[dict] = None
     _cache: dict[str, Response] = field(default_factory=dict)
     _client: Optional[httpx.Client] = None
 
@@ -84,8 +103,30 @@ class ProbeContext:
         auth session is present — callers must check `self.auth_session` first."""
         if not self.auth_session:
             raise RuntimeError("authed_headers() called with no active auth_session")
+        # A blank access token would go out as a bare "Authorization: Bearer "
+        # and read to the server as *no* credential at all ("No authorization
+        # provided"). Fail loudly here instead of shipping an empty bearer.
+        token = (self.auth_session.access_token or "").strip()
+        if not token:
+            raise RuntimeError(
+                "auth_session.access_token is empty/blank — refusing to send an "
+                "'Authorization: Bearer' header with no token value."
+            )
+        # RFC 6750 §2.1 / §7.1: the OAuth 2.0 bearer scheme is the literal
+        # token "Bearer". Several authorization servers (Sentry, Linear, Neon,
+        # Asana) return `"token_type": "bearer"` lowercase in the token
+        # response; echoing that back verbatim makes their resource servers
+        # reject the request with `401 invalid_token`. Normalize to the
+        # canonical casing so an authenticated request is actually accepted.
+        token_type = (self.auth_session.token_type or "Bearer").strip()
+        if token_type.lower() == "bearer":
+            token_type = "Bearer"
         h = dict(extra or {})
-        h["Authorization"] = f"{self.auth_session.token_type} {self.auth_session.access_token}"
+        h["Authorization"] = f"{token_type} {token}"
+        debug_log(
+            f"outgoing Authorization: {token_type} {token!r} "
+            f"(len={len(token)}, empty={not token})"
+        )
         return h
 
     def get(self, url: str, headers: Optional[dict] = None) -> Response:
@@ -161,6 +202,41 @@ class ProbeContext:
             )
         except Exception as e:
             return Response(status=0, headers={}, text="", url=url, error=str(e))
+
+    def resolve_sse_endpoint(self, url: str, headers: Optional[dict] = None,
+                             max_wait: float = 6.0) -> tuple[Optional[str], Optional[str]]:
+        """Open the HTTP+SSE stream at `url` and return
+        (message_endpoint_url, None) taken from its first `endpoint` event —
+        the URL that JSON-RPC POSTs must be sent to under the older
+        HTTP+SSE transport. Returns (None, reason) if the stream can't be
+        opened or names no endpoint. The stream is closed as soon as the
+        endpoint is known; nothing is kept open."""
+        from urllib.parse import urljoin
+        h = {"Accept": "text/event-stream"}
+        h.update(headers or {})
+        try:
+            with self._client.stream("GET", url, headers=h, timeout=max_wait) as r:
+                if r.status_code != 200:
+                    return None, f"status:{r.status_code}"
+                event: Optional[str] = None
+                for line in r.iter_lines():
+                    if not isinstance(line, str):
+                        line = line.decode("utf-8", "replace")
+                    line = line.rstrip("\r")
+                    if line == "":
+                        event = None
+                        continue
+                    if line.startswith(":"):
+                        continue
+                    if line.startswith("event:"):
+                        event = line.split(":", 1)[1].strip()
+                    elif line.startswith("data:"):
+                        data = line.split(":", 1)[1].strip()
+                        if event in ("endpoint", None) and (data.startswith("/") or data.startswith("http")):
+                            return urljoin(url, data), None
+                return None, "stream-ended-without-endpoint-event"
+        except Exception as e:
+            return None, f"error:{type(e).__name__}"
 
     def close(self):
         if self._client:

@@ -319,6 +319,31 @@ def _print_report(report) -> None:
         _print_report_plain(report)
 
 
+def _print_server_separator(target, index: int | None = None, total: int | None = None) -> None:
+    """Full-width divider + bold name/URL header printed before each server's
+    report in a multi-server run, with blank space above it, so it's obvious
+    at a glance where one server's block ends and the next begins."""
+    label = target.name or target.url or "unnamed"
+    if index is not None and total is not None:
+        label = f"{label}  ·  {index}/{total}"
+
+    if _RICH:
+        _console.print()
+        _console.print()
+        _console.rule(f"[bold]{label}[/bold]", style="bold cyan")
+        if target.url:
+            _console.print(f"[bold cyan]{target.url}[/bold cyan]")
+    else:
+        import shutil
+        width = shutil.get_terminal_size((100, 20)).columns
+        print("\n")
+        print("=" * width)
+        print(f"  {label}")
+        if target.url:
+            print(f"  {target.url}")
+        print("=" * width)
+
+
 # ---------------------------------------------------------------------------
 # Rubric listing (section-grouped)
 # ---------------------------------------------------------------------------
@@ -485,12 +510,14 @@ def _cmd_eval_file(args):
     if outdir:
         outdir.mkdir(parents=True, exist_ok=True)
     summary = []
-    for target in targets:
+    total = len(targets)
+    for i, target in enumerate(targets, start=1):
         include_auth = _confirm_auth(target.name)
         auth_input = _build_auth_input(args) if include_auth else None
         with _progress(target.name) as on_result:
             report = evaluate(target, include_auth=include_auth, auth_input=auth_input,
                                on_result=on_result)
+        _print_server_separator(target, index=i, total=total)
         _print_report(report)
         summary.append(report.to_dict())
         if outdir:

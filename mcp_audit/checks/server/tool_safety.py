@@ -13,7 +13,9 @@ example) — but these checks don't `requires_auth`-gate: on a server that
 serves tools/list unauthenticated, the check still runs and its evidence
 records "obtained without authentication" rather than the Method tag
 changing per-server. If tools/list genuinely requires a session and none is
-available, the check reports `n/a`.
+available, the check reports `n/a`. If a completed --auth session *is*
+available and tools/list is still refused, the check reports `error` with
+the exact request/response.
 
 Spec source: modelcontextprotocol.io/specification/draft/server/tools
 """
@@ -50,7 +52,7 @@ _INJECTION_TOOL_PATTERNS = (
 )
 
 
-def _fetch_error_result(check: Check, err: str):
+def _fetch_error_result(check: Check, err: str, ctx: ProbeContext):
     if err == "stdio-no-http":
         return check._result(
             Rating.NA,
@@ -62,7 +64,30 @@ def _fetch_error_result(check: Check, err: str):
             Rating.NA,
             "tools/list requires authentication; re-run with --auth to inspect it.",
         )
-    return check._result(Rating.NA, f"tools/list was unavailable ({err}).")
+
+    evidence = ctx.last_tools_list_evidence or {}
+    if err == "sse-async-not-captured":
+        return check._result(
+            Rating.NA,
+            "The server accepted the tools/list request with HTTP 202 and "
+            "returns the result on a separate SSE stream, which this probe "
+            "does not consume. SSE async response not captured.",
+            evidence,
+        )
+    if ctx.auth_session:
+        # A completed --auth session is in hand, yet tools/list still refused
+        # the request.
+        return check._result(
+            Rating.ERROR,
+            f"tools/list was rejected ({err}) even though an authenticated "
+            f"session is available, so the tool list could not be inspected. "
+            f"The exact request sent and the server's response are in the "
+            f"evidence below.",
+            evidence,
+        )
+    return check._result(
+        Rating.NA, f"tools/list was unavailable ({err}).", evidence
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +113,7 @@ class ToolBlastRadius(Check):
     def run(self, target, ctx: ProbeContext):
         tools, err = fetch_tools(target, ctx)
         if err:
-            return _fetch_error_result(self, err)
+            return _fetch_error_result(self, err, ctx)
         if not tools:
             return self._result(Rating.NA, "tools/list returned an empty tool list.")
 
@@ -155,7 +180,7 @@ class ToolRwSeparation(Check):
     def run(self, target, ctx: ProbeContext):
         tools, err = fetch_tools(target, ctx)
         if err:
-            return _fetch_error_result(self, err)
+            return _fetch_error_result(self, err, ctx)
         if not tools:
             return self._result(Rating.NA, "tools/list returned an empty tool list.")
 
@@ -241,7 +266,7 @@ class ToolInjectionSurface(Check):
     def run(self, target, ctx: ProbeContext):
         tools, err = fetch_tools(target, ctx)
         if err:
-            return _fetch_error_result(self, err)
+            return _fetch_error_result(self, err, ctx)
         if not tools:
             return self._result(Rating.NA, "tools/list returned an empty tool list.")
 

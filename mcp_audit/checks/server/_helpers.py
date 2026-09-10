@@ -3,6 +3,13 @@
 """
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass, field
+from typing import Optional
+from urllib.parse import urlparse, urlunparse
+
+from ...core.probe import debug_log, debug_tokens_enabled
+
 MCP_VERSION = "2026-07-28"
 
 
@@ -31,19 +38,6 @@ def maybe_authed_headers(ctx, headers: dict) -> tuple[dict, bool]:
     return headers, False
 
 
-def probe_reaches_property_stage(response) -> bool:
-    """True if `response` indicates the request was structurally valid
-    enough to reach past body/header validation — 200, 401, 403, whatever —
-    and False only for HTTP 400, which on an otherwise-correct request means
-    the server rejected it at an earlier validation stage unrelated to the
-    property under test. A network error also fails this.
-
-    Guard behind every baseline-vs-mutated differential check: if the
-    baseline itself doesn't pass this, the check cannot draw a conclusion
-    and must report ERROR/not-tested instead."""
-    return not response.error and response.status != 400
-
-
 def redact_headers(headers: dict) -> dict:
     """Headers dict safe to place in evidence/JSON output. The Authorization
     value (a live bearer token) is replaced with a marker so findings stay
@@ -62,7 +56,8 @@ def request_evidence(method: str, url: str, headers: dict, body, response) -> di
     """Full request/response evidence for one probe, with any bearer token
     redacted, so a check's finding can be hand-verified by re-sending the
     exact same request. Used by every baseline-vs-mutated differential check —
-    see probe_reaches_property_stage's docstring."""
+    see Check.baseline_gate, which gates a conclusion on the baseline here
+    reaching a 2xx."""
     return {
         "request_method": method,
         "request_url": url,
@@ -73,14 +68,52 @@ def request_evidence(method: str, url: str, headers: dict, body, response) -> di
     }
 
 
-def extract_jsonrpc_error(text: str) -> dict | None:
-    """Parse the error object from a JSON-RPC response body, or return None."""
+def parse_jsonrpc_message(text: str) -> dict | None:
+    """Parse one JSON-RPC object from an MCP POST response body, whether the
+    server replied with `application/json` (the body *is* the object) or
+    `text/event-stream` (the object is the `data:` payload of an SSE
+    `message` event — MCP Streamable HTTP lets a server answer a POST with
+    either, and we send `Accept: application/json, text/event-stream`).
+    Returns the last JSON object found, or None."""
     import json
-    try:
-        doc = json.loads(text)
-        return doc.get("error")
-    except Exception:
+    if not text:
         return None
+    stripped = text.lstrip()
+    if stripped[:1] in "{[":
+        try:
+            doc = json.loads(text)
+            return doc if isinstance(doc, dict) else None
+        except Exception:
+            return None
+    # SSE framing: gather consecutive `data:` lines per event; keep the last
+    # payload that parses to a JSON object. `event:` / `id:` / `:comment`
+    # lines are ignored.
+    last: dict | None = None
+    buf: list[str] = []
+    for raw in text.splitlines() + [""]:
+        line = raw.rstrip("\r")
+        if line.startswith("data:"):
+            buf.append(line[5:].lstrip(" "))
+        elif not line:
+            if buf:
+                try:
+                    doc = json.loads("\n".join(buf))
+                    if isinstance(doc, dict):
+                        last = doc
+                except Exception:
+                    pass
+            buf = []
+    return last
+
+
+def extract_jsonrpc_error(text: str) -> dict | None:
+    """The JSON-RPC `error` object (a dict with `code`/`message`) from a
+    response body — plain JSON or SSE-framed — or None. A body like
+    `{"error": "invalid_token"}` (OAuth-style, `error` is a bare string) is
+    not a JSON-RPC error object and yields None."""
+    msg = parse_jsonrpc_message(text)
+    err = msg.get("error") if msg else None
+    return err if isinstance(err, dict) else None
 
 
 def base_url(url: str) -> str:
@@ -109,30 +142,401 @@ def tools_list_body(version: str = MCP_VERSION) -> dict:
     }
 
 
+_INIT_METHOD = "initialize"
+
+
+def initialize_body(version: str = MCP_VERSION) -> dict:
+    """JSON-RPC body for the MCP `initialize` handshake. Sent before
+    tools/list (and the transport probes) because spec-strict servers
+    (Linear, Sentry, Stripe, Neon) reject a bare tools/list until initialize
+    has completed.
+
+    `method` and `params.protocolVersion` here MUST match the Mcp-Method and
+    MCP-Protocol-Version headers that `_initialize_headers(ctx, version)`
+    builds for the same `version` — a request whose mirrored headers disagree
+    with its body is rejected with `400` (`-32020 HeaderMismatch` or
+    `-32602`). Both sides are derived from `version` so they cannot drift."""
+    return {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": _INIT_METHOD,
+        "params": {
+            "protocolVersion": version,
+            "capabilities": {},
+            "clientInfo": {"name": "mcp-audit", "version": "0.1"},
+        },
+    }
+
+
+def _initialize_headers(ctx, version: str = MCP_VERSION) -> tuple[dict, bool]:
+    """Headers for the `initialize` POST: the standard MCP POST headers for
+    `version` + method `initialize` — so the `MCP-Protocol-Version` and
+    `Mcp-Method` headers mirror `initialize_body(version)`'s `protocolVersion`
+    and `method` exactly — plus the bearer token. Neon enforces that these
+    mirrored headers are present and consistent with the body and returns
+    `400` otherwise (Linear/Sentry tolerate their absence, but matching
+    headers satisfy all three). Returns (headers, authorization_sent)."""
+    headers = mcp_post_headers(version=version, method=_INIT_METHOD)
+    if ctx.auth_session:
+        headers.update(ctx.authed_headers())
+        return headers, True
+    return headers, False
+
+
+@dataclass
+class McpSession:
+    """Everything a JSON-RPC POST to this target needs beyond a token:
+      - ``message_url``: where POSTs go — not the configured URL when that URL
+        is an HTTP+SSE stream (then it's the endpoint the stream announces);
+      - ``protocol_version``: the version ``initialize`` negotiated, to send in
+        the MCP-Protocol-Version header (and mirror in the body) on every
+        later request so header and body stay consistent;
+      - ``session_headers``: any ``Mcp-Session-Id`` ``initialize`` returned
+        that the server expects echoed on every subsequent request;
+      - ``sse``: True when the message endpoint was resolved from an SSE
+        ``endpoint`` event — replies then arrive asynchronously on that
+        stream and a bare POST returns ``202 Accepted``.
+
+    Resolved once per target and cached on ``target.context['mcp_session']``."""
+    message_url: str
+    protocol_version: str = MCP_VERSION
+    session_headers: dict = field(default_factory=dict)
+    sse: bool = False
+    initialized: bool = False
+    accepted_async: bool = False
+    error: Optional[str] = None
+    evidence: dict = field(default_factory=dict)
+
+
+def _is_sse_endpoint(url: str) -> bool:
+    return urlparse(url).path.rstrip("/").endswith("/sse")
+
+
+def _streamable_http_guess(url: str) -> str:
+    """Best-effort Streamable-HTTP URL for a server configured with an
+    HTTP+SSE stream URL: swap a trailing `/sse` for `/mcp`."""
+    p = urlparse(url)
+    return urlunparse(p._replace(path=re.sub(r"/sse/?$", "/mcp", p.path)))
+
+
+def _resolve_message_url(target, ctx) -> tuple[str, Optional[str], bool]:
+    """Where JSON-RPC POSTs for this target go, and whether that endpoint is a
+    true HTTP+SSE message endpoint (async replies). For a normal
+    Streamable-HTTP endpoint it's the configured URL, replying synchronously.
+    For an `…/sse` endpoint the real message endpoint is announced in the
+    stream's first `endpoint` event; if that handshake can't be completed
+    (e.g. the stream itself needs a token this run doesn't have) fall back to
+    the conventional Streamable-HTTP path. Returns
+    (url, note, via_sse_handshake)."""
+    url = target.url
+    if not _is_sse_endpoint(url):
+        return url, None, False
+    headers, _ = maybe_authed_headers(ctx, {})
+    resolved, err = ctx.resolve_sse_endpoint(url, headers)
+    if resolved:
+        return resolved, f"resolved via SSE endpoint event from {url}", True
+    guess = _streamable_http_guess(url)
+    return (guess,
+            f"SSE handshake with {url} failed ({err}); using Streamable-HTTP path {guess}",
+            False)
+
+
+_VERSION_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _server_supported_version(jerr: dict) -> Optional[str]:
+    """From an `initialize` JSON-RPC error, return the newest protocol version
+    the server says it supports, or None. Servers put the list in different
+    places — `data.supported`, `data.supportedVersions`, `data.versions`,
+    `data` as a bare list — and some only name it in the message text
+    (Neon's -32000 "Unsupported protocol version" carries the list in
+    `data`). Version strings are ISO dates, so lexicographic max == newest."""
+    if not isinstance(jerr, dict):
+        return None
+    data = jerr.get("data")
+    cands: list = []
+    if isinstance(data, list):
+        cands = data
+    elif isinstance(data, dict):
+        for k in ("supported", "supportedVersions", "supported_versions", "versions"):
+            v = data.get(k)
+            if isinstance(v, list):
+                cands = v
+                break
+        else:
+            if isinstance(data.get("protocolVersion"), str):
+                cands = [data["protocolVersion"]]
+    if not cands:
+        cands = _VERSION_RE.findall(jerr.get("message") or "")
+    versions = sorted({v for v in cands if isinstance(v, str) and _VERSION_RE.fullmatch(v)})
+    return versions[-1] if versions else None
+
+
+def _record_initialize_failure(evidence: dict, r, headers: dict, body: dict) -> tuple[str, Optional[str]]:
+    """Populate `evidence` from a rejected `initialize` (HTTP error, or HTTP
+    200 carrying a JSON-RPC error) and return (err_tag, best_supported_version).
+    `request_evidence` truncates the body to 500 chars; keep the full thing
+    (bounded) and surface the JSON-RPC error so it's diagnosable from the
+    report alone."""
+    evidence["response_body_full"] = (r.text or "")[:4000]
+    jerr = extract_jsonrpc_error(r.text)
+    if not jerr:
+        return f"initialize-status:{r.status}", None
+    code = jerr.get("code")
+    evidence["jsonrpc_error"] = {"code": code, "message": jerr.get("message"),
+                                "data": jerr.get("data")}
+    best = _server_supported_version(jerr)
+    if code in (-32000, -32020, -32602) or best:
+        evidence["initialize_request_rejected"] = (
+            f"Server rejected initialize with JSON-RPC {code} "
+            f"({jerr.get('message')!r}). Sent MCP-Protocol-Version="
+            f"{headers.get('MCP-Protocol-Version')!r}, Mcp-Method="
+            f"{headers.get('Mcp-Method')!r}; body method={body['method']!r}, "
+            f"params.protocolVersion={body['params'].get('protocolVersion')!r}."
+            + (f" Server supports {best!r} — adopted for later requests." if best else "")
+        )
+    return f"initialize-jsonrpc-error:{code}", best
+
+
+def mcp_session(target, ctx) -> McpSession:
+    """Resolve this target's message endpoint and run the MCP initialize
+    handshake (with the bearer token when --auth completed), negotiating the
+    protocol version from the server's response and capturing any
+    Mcp-Session-Id. Cached per target — the handshake runs at most once."""
+    cached = target.context.get("mcp_session")
+    if cached is not None:
+        return cached
+
+    message_url, resolve_note, via_sse = _resolve_message_url(target, ctx)
+
+    # Negotiate the protocol version. Send our preferred one; if initialize
+    # comes back with a JSON-RPC error naming the server's supported versions
+    # (Neon answers -32000 "Unsupported protocol version" with the list),
+    # retry once with the newest version the server actually supports. Header
+    # and body are always built from the same `init_version`, so the mirrored
+    # MCP-Protocol-Version / Mcp-Method headers agree with the body.
+    init_version = MCP_VERSION
+    negotiation: list[dict] = []
+    r = headers = body = None
+    auth_sent = False
+    for attempt in range(2):
+        headers, auth_sent = _initialize_headers(ctx, init_version)
+        body = initialize_body(init_version)
+        r = ctx.post(message_url, json_body=body, headers=headers)
+        jerr = None if r.error else extract_jsonrpc_error(r.text)
+        negotiation.append({
+            "sent_version": init_version,
+            "http_status": r.status,
+            "jsonrpc_error_code": (jerr or {}).get("code"),
+        })
+        if r.error or attempt == 1 or not jerr:
+            break
+        better = _server_supported_version(jerr)
+        if not better or better == init_version:
+            break
+        debug_log(f"initialize: server rejected protocolVersion {init_version!r}; "
+                  f"retrying with server-supported {better!r}")
+        init_version = better
+
+    evidence = request_evidence("POST", message_url, headers, body, r)
+    evidence["authorization_sent"] = auth_sent
+    evidence["protocol_negotiation"] = negotiation
+    if resolve_note:
+        evidence["endpoint_resolution"] = resolve_note
+
+    # Local, unredacted dump of the initialize exchange (full body, both
+    # verbs) for diagnosing a rejected handshake — only when the operator
+    # sets MCP_AUDIT_DEBUG_TOKENS. Nothing here touches the on-disk evidence.
+    if debug_tokens_enabled() and ctx.auth_session:
+        g = ctx.get(message_url, headers=ctx.authed_headers(
+            {"Accept": "application/json, text/event-stream"}))
+        debug_log(f"initialize POST  {message_url} -> {r.status}  "
+                  f"headers sent: MCP-Protocol-Version={headers.get('MCP-Protocol-Version')!r} "
+                  f"Mcp-Method={headers.get('Mcp-Method')!r}  "
+                  f"body: method={body['method']!r} "
+                  f"protocolVersion={body['params'].get('protocolVersion')!r}")
+        debug_log(f"initialize POST  full response body: {r.text!r}")
+        debug_log(f"plain authed GET {message_url} -> {g.status} {(g.text or '')[:200]!r}")
+        debug_log("EXPECT: authed GET is non-401 once the token is valid; "
+                  "if both are 401 the issued token itself is being rejected.")
+
+    session_headers: dict = {}
+    sid = None if r.error else r.headers.get("mcp-session-id")
+    if sid:
+        session_headers["Mcp-Session-Id"] = sid
+
+    # Default to the last version we actually sent: MCP_VERSION when no
+    # negotiation happened, or the server's own supported version when we
+    # retried with it. A clean initialize may narrow it further via
+    # result.protocolVersion.
+    protocol_version = init_version
+    initialized = False
+    accepted_async = False
+    err: Optional[str] = None
+
+    if r.error:
+        err = f"initialize-request-error:{r.error}"
+    elif r.status == 202:
+        # Old HTTP+SSE transport: the server accepted the request and will
+        # deliver the InitializeResult on the SSE stream, which this probe
+        # does not hold open across the POST. "Accepted, reply not captured" —
+        # not a failure.
+        accepted_async = True
+        initialized = True
+        err = "initialize-accepted-async-202"
+    elif 200 <= r.status < 300:
+        jerr = extract_jsonrpc_error(r.text)
+        if jerr:
+            # HTTP 200 carrying a JSON-RPC error body — e.g. a -32000 version
+            # rejection returned inside a 200 rather than as an HTTP error.
+            err, best = _record_initialize_failure(evidence, r, headers, body)
+            if best:
+                protocol_version = best
+            debug_log(f"initialize {message_url} -> 200 + JSON-RPC error; body: {r.text!r}")
+        else:
+            initialized = True
+            # The InitializeResult may arrive as plain JSON or SSE-framed
+            # (text/event-stream) — parse both, so the negotiated version is
+            # actually captured and not silently dropped.
+            doc = parse_jsonrpc_message(r.text)
+            negotiated = ((doc or {}).get("result") or {}).get("protocolVersion")
+            if isinstance(negotiated, str) and negotiated:
+                protocol_version = negotiated
+                evidence["negotiated_protocol_version"] = negotiated
+            else:
+                evidence["negotiated_protocol_version"] = None
+                evidence["initialize_result_unparsed"] = (r.text or "")[:500]
+    elif r.status == 401 and not ctx.auth_session:
+        err = "initialize-no-auth-session"
+        evidence["note"] = (
+            "No completed --auth session, so the initialize POST carried no "
+            "bearer token — this 401 is expected. Re-run with --auth."
+        )
+    elif r.status == 401:
+        # The token that GET-based checks accept was rejected on this POST.
+        # Capture a same-token GET beside the POST so the difference is in
+        # evidence (header format / content negotiation / session).
+        err = "initialize-status:401"
+        get_headers = {**ctx.authed_headers(),
+                       "Accept": "application/json, text/event-stream"}
+        g = ctx.get(message_url, headers=get_headers)
+        evidence["reference_get"] = {
+            "request_headers": redact_headers(get_headers),
+            "response_status": g.status,
+            "response_body": (g.text or "")[:300],
+        }
+        evidence["post_vs_get"] = (
+            f"POST {message_url} with the bearer token -> {r.status} "
+            f"({(r.text or '')[:120]!r}); GET the same URL with the same token "
+            f"-> {g.status}"
+        )
+    else:
+        err, best = _record_initialize_failure(evidence, r, headers, body)
+        if best:
+            protocol_version = best
+        debug_log(f"initialize {message_url} -> {r.status}; full body: {r.text!r}")
+
+    if initialized and not accepted_async:
+        # Spec: the client MUST send notifications/initialized before issuing
+        # any other request. Best-effort — the response is not needed.
+        note_headers = mcp_post_headers(version=protocol_version,
+                                        method="notifications/initialized")
+        note_headers, _ = maybe_authed_headers(ctx, note_headers)
+        note_headers.update(session_headers)
+        ctx.post(
+            message_url,
+            json_body={"jsonrpc": "2.0", "method": "notifications/initialized"},
+            headers=note_headers,
+        )
+
+    session = McpSession(
+        message_url=message_url,
+        protocol_version=protocol_version,
+        session_headers=session_headers,
+        sse=via_sse,
+        initialized=initialized,
+        accepted_async=accepted_async,
+        error=err,
+        evidence=evidence,
+    )
+    target.context["mcp_session"] = session
+    return session
+
+
+def mcp_message_target(target, ctx, method: str = "tools/list") -> tuple[str, dict, bool, McpSession]:
+    """(url, headers, used_auth, session) for a JSON-RPC POST probe: the
+    resolved message endpoint, MCP POST headers carrying the **negotiated**
+    protocol version, the Mcp-Session-Id from the initialize handshake, and
+    the bearer token when --auth completed. Every JSON-RPC probe in this
+    project routes through here so SSE endpoints, session ids and the
+    negotiated version are handled in one place. Callers that also send a
+    body must build it with `session.protocol_version` so header and body
+    agree."""
+    session = mcp_session(target, ctx)
+    headers = mcp_post_headers(version=session.protocol_version, method=method)
+    headers.update(session.session_headers)
+    headers, used_auth = maybe_authed_headers(ctx, headers)
+    return session.message_url, headers, used_auth, session
+
+
+def accepted_async(*responses) -> bool:
+    """True if any probe response is HTTP 202 — the server took the request
+    and the JSON-RPC reply is on a separate SSE stream this probe does not
+    consume. Callers must treat this as inconclusive (n/a), never fail."""
+    return any(getattr(r, "status", None) == 202 for r in responses)
+
+
+def sse_async_na(check, evidence: dict):
+    """The standard n/a result for `accepted_async`: never an error or fail."""
+    from ...core.models import Rating
+    return check._result(
+        Rating.NA,
+        "The server accepted the probe with HTTP 202 and delivers the JSON-RPC "
+        "response on a separate SSE stream, which this probe does not consume. "
+        "SSE async response not captured.",
+        evidence,
+    )
+
+
+def _tools_from_response(r):
+    """(tools, err) from a tools/list HTTP 200 — body may be plain JSON or
+    SSE-framed. A JSON-RPC error in the body (e.g. -32000) is surfaced, not
+    swallowed as an empty tool list."""
+    doc = parse_jsonrpc_message(r.text)
+    if doc is None:
+        return None, f"parse-error:unparseable response body ({(r.text or '')[:120]!r})"
+    err = doc.get("error")
+    if isinstance(err, dict):
+        return None, f"jsonrpc-error:{err.get('code')}:{err.get('message')}"
+    tools = (doc.get("result") or {}).get("tools") or doc.get("tools") or []
+    return tools, None
+
+
 def fetch_tools(target, ctx):
     """Send tools/list and return (tools, err). err is one of None,
     'stdio-no-http', 'auth-required', 'request-error:...', 'unexpected-status:N',
-    'parse-error:...'. Shared by every check that needs the live tool list."""
+    'parse-error:...', 'jsonrpc-error:...'. Shared by every check that needs
+    the live tool list."""
     from ...core.models import Transport
     if target.transport == Transport.STDIO or not target.url:
         return None, "stdio-no-http"
 
-    headers = mcp_post_headers(method="tools/list")
-    r = ctx.post(target.url, json_body=tools_list_body(), headers=headers)
+    url, headers, _used_auth, session = mcp_message_target(target, ctx, method="tools/list")
+    body = tools_list_body(version=session.protocol_version)
+    r = ctx.post(url, json_body=body, headers=headers)
+    ctx.last_tools_list_evidence = request_evidence("POST", url, headers, body, r)
+    if session.evidence:
+        ctx.last_tools_list_evidence["initialize"] = session.evidence
 
     if r.error:
         return None, f"request-error:{r.error}"
+    if r.status == 202:
+        return None, "sse-async-not-captured"
     if r.status == 401:
         return None, "auth-required"
     if r.status != 200:
         return None, f"unexpected-status:{r.status}"
-
-    try:
-        doc = r.json()
-        tools = doc.get("result", {}).get("tools") or doc.get("tools", [])
-        return tools, None
-    except Exception as exc:
-        return None, f"parse-error:{exc}"
+    return _tools_from_response(r)
 
 
 def fetch_tools_authed(target, ctx):
@@ -144,20 +548,22 @@ def fetch_tools_authed(target, ctx):
     if not ctx.auth_session:
         return fetch_tools(target, ctx)
 
-    headers = mcp_post_headers(method="tools/list")
-    headers.update(ctx.authed_headers())
-    r = ctx.post(target.url, json_body=tools_list_body(), headers=headers)
+    # mcp_message_target already merges the bearer token via maybe_authed_headers
+    # (ctx.auth_session is set here), plus the Mcp-Session-Id from initialize.
+    url, headers, _used_auth, session = mcp_message_target(target, ctx, method="tools/list")
+    body = tools_list_body(version=session.protocol_version)
+    r = ctx.post(url, json_body=body, headers=headers)
+    ctx.last_tools_list_evidence = request_evidence("POST", url, headers, body, r)
+    if session.evidence:
+        ctx.last_tools_list_evidence["initialize"] = session.evidence
 
     if r.error:
         return None, f"request-error:{r.error}"
+    if r.status == 202:
+        return None, "sse-async-not-captured"
     if r.status != 200:
         return None, f"unexpected-status:{r.status}"
-    try:
-        doc = r.json()
-        tools = doc.get("result", {}).get("tools") or doc.get("tools", [])
-        return tools, None
-    except Exception as exc:
-        return None, f"parse-error:{exc}"
+    return _tools_from_response(r)
 
 
 def obtained_without_auth_note(ctx) -> str:

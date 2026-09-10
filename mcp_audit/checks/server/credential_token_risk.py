@@ -372,6 +372,15 @@ class ShortLivedAndRefreshRotates(Check):
             refreshed = oauth_module.refresh(ctx, target.context.get("as_metadata", {}), client, session)
             rotated = refreshed.probe_evidence.get("refresh_rotated_token")
             evidence["refresh_rotated_token"] = rotated
+            # Spending the refresh token can invalidate the access token it
+            # replaces on servers with strict rotation (observed on Neon and
+            # Stripe; not on Linear/Sentry). Adopt the freshly-issued session
+            # so every later Auth-method check (initialize, tools/list, the
+            # transport probes) uses the token the AS now considers active —
+            # otherwise this probe silently breaks auth for the rest of the run.
+            if refreshed.probe_evidence.get("refresh_returned_new_access_token"):
+                ctx.auth_session = refreshed
+                evidence["session_adopted_refreshed_token"] = True
             notes.append(
                 "the refresh token rotated to a new value on use" if rotated
                 else "the SAME refresh token was returned again after use (no rotation)"

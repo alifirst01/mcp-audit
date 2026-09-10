@@ -1,7 +1,23 @@
 # Add servers here; run:  mcp-audit eval-file servers/servers.yaml --out results/
-- name: Supabase MCP (remote)
-  url: https://mcp.supabasse.com/mcp
-- name: Github MCP (remote)
-  url: https://api.githubcopilot.com/mcp
+#- name: Supabase MCP (remote)
+#  url: https://mcp.supabase.com/mcp
+#- name: Github MCP (remote)
+#  url: https://api.githubcopilot.com/mcp
+#- name: Notion MCP (remote)
+#  url: https://mcp.notion.com/mcp
+- name: Linear MCP (remote)
+  url: https://mcp.linear.app/mcp
+- name: Stripe MCP (remote)
+  url: https://mcp.stripe.com
+- name: Asana MCP (remote)
+  url: https://mcp.asana.com/sse
+- name: Sentry MCP (remote)
+  url: https://mcp.sentry.dev/mcp
+- name: Neon MCP (remote)
+  url: https://mcp.neon.tech/mcp
+#- name: Vercel MCP (remote)
+#  url: https://mcp.vercel.com
+- name: Figma MCP (remote)
+  url: https://mcp.figma.com/mcp
 
 

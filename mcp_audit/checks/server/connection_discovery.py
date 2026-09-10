@@ -341,7 +341,7 @@ class RegistrationPriority(Check):
             return self._result(
                 Rating.WARN,
                 f"Only Dynamic Client Registration is advertised, at "
-                f"{dcr_endpoint}. The specification deprecates Dynamic "
+                f"{dcr_endpoint}. The MCP specification deprecates Dynamic "
                 f"Client Registration in favor of Client ID Metadata "
                 f"Documents, which this login server does not advertise — "
                 f"a new agent can still register, but only through the "
