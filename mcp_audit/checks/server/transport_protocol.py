@@ -1,16 +1,10 @@
 """Transport & Protocol Plumbing — is the underlying transport sound?
+Covers transport encryption, DNS-rebinding (Origin) defense, and
+protocol-version / header consistency enforcement.
 
-The wire-level checks that apply to the literal first request a client
-makes and to every request thereafter: transport encryption, DNS-rebinding
-defense, and protocol-version/header consistency enforcement.
-
-TR-07 is planned, not implemented here — see
-admin/checks/server/transport_protocol_planned.py. TR-03 and TR-06 were cut
-from the rubric entirely; their code lives in admin/checks/server/retired.py
-for reference only — see docs/RUBRIC.md's "Retired checks" note.
-
-TR-01, TR-04, TR-05, and TR-08 use the differential-testing method — see
-docs/METHODOLOGY.md.
+TR-01/04/05/08 are differential checks: send a known-good baseline request,
+then one that differs in a single property, and compare (see
+docs/METHODOLOGY.md and `_helpers.differential_guard`).
 
 Spec sources:
   modelcontextprotocol.io/specification/draft/basic/transports/streamable-http
@@ -26,6 +20,7 @@ from ...core.probe import ProbeContext
 from ._helpers import (
     accepted_async,
     base_url,
+    differential_guard,
     extract_jsonrpc_error,
     mcp_message_target,
     request_evidence,
@@ -43,20 +38,20 @@ _SPEC_VERSIONING = (
 )
 
 
-# ---------------------------------------------------------------------------
-# TR-01  DNS rebinding / Origin header validation
-# ---------------------------------------------------------------------------
-
 @register
 class ForeignOriginRejected(Check):
+    """TR-01: a request with a foreign `Origin` is rejected with 403. MCP
+    Streamable HTTP §Security — servers MUST validate `Origin` on every
+    connection (DNS-rebinding defense)."""
+
     id = "transport-foreign-origin-rejected"
     rubric_id = "TR-01"
     section = _SECTION
     display_order = 701
     method = "Probe"
-    # Runs after the engine's lazy --auth trigger, so if --auth succeeded
-    # this probe can carry a real token past a server that checks auth
-    # before Origin instead of only reporting an inconclusive WARN on 401.
+    # Ordered after the engine's lazy --auth trigger so the probe can carry a
+    # real token: a server that checks auth before Origin would otherwise only
+    # ever return an inconclusive 401.
     order = 460
     title = "Requests with a foreign `Origin` header are rejected"
     spec_level = SpecLevel.MUST
@@ -84,8 +79,7 @@ class ForeignOriginRejected(Check):
 
         evidence = {
             "used_auth": used_auth,
-            "mcp_session": {"message_url": probe_url, "initialized": session.initialized,
-                            "protocol_version": session.protocol_version, "error": session.error},
+            "mcp_session": session.summary(),
             "baseline_no_origin": request_evidence("POST", probe_url, base_headers, body, r_no_origin),
             "baseline_legit_origin": request_evidence("POST", probe_url, legit_headers, body, r_legit),
             "mutated_foreign_origin": request_evidence("POST", probe_url, evil_headers, body, r_evil),
@@ -102,11 +96,9 @@ class ForeignOriginRejected(Check):
         if accepted_async(r_no_origin, r_legit, r_evil):
             return sse_async_na(self, evidence)
 
-        # Baseline: a request with no hostile Origin, using the exact
-        # tools/list shape proven to work elsewhere in this run. Prefer the
-        # no-Origin probe and fall back to the legit-Origin one; either must
-        # reach a 2xx success for the foreign-Origin comparison to isolate
-        # Origin validation rather than some earlier rejection.
+        # The foreign-Origin comparison only isolates Origin validation if a
+        # request without a hostile Origin reaches a 2xx. Prefer the no-Origin
+        # probe, fall back to the legit-Origin one.
         reference, reference_label = None, None
         for candidate, label in ((r_no_origin, "no Origin header"), (r_legit, f"Origin: {legit_origin}")):
             if 200 <= candidate.status < 300:
@@ -155,13 +147,12 @@ class ForeignOriginRejected(Check):
         )
 
 
-# ---------------------------------------------------------------------------
-# TR-02  Transport encryption (TLS) — every endpoint involved in this
-# evaluation, not just the MCP endpoint itself.
-# ---------------------------------------------------------------------------
-
 @register
 class HttpsRequired(Check):
+    """TR-02: every endpoint this evaluation touches (MCP endpoint and every
+    AS endpoint) is HTTPS. MCP Auth §Communication Security — remote endpoints
+    MUST use TLS."""
+
     id = "transport-https"
     rubric_id = "TR-02"
     section = _SECTION
@@ -224,30 +215,23 @@ class HttpsRequired(Check):
         )
 
 
-# ---------------------------------------------------------------------------
-# TR-04  MCP-Protocol-Version header/body mismatch
-#
-# Tests a header that disagrees with the body's declared version, not a
-# header that's simply absent. The specification allows a server supporting
-# pre-2025-06-18 clients to treat a genuinely MISSING MCP-Protocol-Version
-# header as defaulting to protocol version 2025-03-26, for backward
-# compatibility — so a bare-missing header is not a universal MUST-reject
-# case, and probing it would produce a false FAIL against a legitimately
-# backward-compatible server. A header that IS present but disagrees with
-# the body's declared version is the unambiguous case: header/body
-# consistency is a separate MUST regardless of backward-compatibility mode.
-# ---------------------------------------------------------------------------
-
 @register
 class VersionHeaderEnforced(Check):
+    """TR-04: an `MCP-Protocol-Version` header that disagrees with the body's
+    declared version is rejected with 400 / `-32020 HeaderMismatch` (MCP
+    Streamable HTTP §Protocol Version Header).
+
+    Only a *present but mismatched* header is probed: a missing header may be
+    tolerated for pre-2025-06-18 backward compatibility, so probing that would
+    false-FAIL a compliant server. Header/body consistency is a separate MUST.
+    """
+
     id = "transport-version-header-enforced"
     rubric_id = "TR-04"
     section = _SECTION
     display_order = 704
     method = "Probe"
-    # See TR-01's comment: runs after the lazy --auth trigger so this can
-    # retry authenticated instead of only ever seeing the 401 challenge.
-    order = 462
+    order = 462  # after the --auth trigger (see TR-01)
     title = "Mismatched protocol-version header is rejected"
     spec_level = SpecLevel.MUST
     spec_ref = (
@@ -275,30 +259,14 @@ class VersionHeaderEnforced(Check):
 
         evidence = {
             "used_auth": used_auth,
-            "mcp_session": {"message_url": probe_url, "initialized": session.initialized,
-                            "protocol_version": session.protocol_version, "error": session.error},
+            "mcp_session": session.summary(),
             "baseline": request_evidence("POST", probe_url, base_headers, body, r_baseline),
             "mutated": request_evidence("POST", probe_url, mutated_headers, body, r_mutated),
         }
 
-        if r_baseline.error or r_mutated.error:
-            return self._result(
-                Rating.ERROR,
-                "The baseline or mutated probe failed at the network level; "
-                "see evidence for which.",
-                evidence,
-            )
-
-        if accepted_async(r_baseline, r_mutated):
-            return sse_async_na(self, evidence)
-
-        # The baseline uses a matching MCP-Protocol-Version header and body —
-        # the exact tools/list shape proven to work elsewhere in this run. If
-        # even that doesn't reach a 2xx, header/body version-mismatch behavior
-        # can't be isolated from the earlier rejection.
-        na = self.baseline_gate(r_baseline, evidence)
-        if na:
-            return na
+        stop = differential_guard(self, evidence, r_baseline, r_mutated)
+        if stop:
+            return stop
 
         if r_mutated.status == 400:
             err = extract_jsonrpc_error(r_mutated.text)
@@ -341,20 +309,19 @@ class VersionHeaderEnforced(Check):
         )
 
 
-# ---------------------------------------------------------------------------
-# TR-05  Header–body consistency
-# ---------------------------------------------------------------------------
-
 @register
 class HeaderBodyConsistency(Check):
+    """TR-05: a mirrored `Mcp-Method` header that disagrees with the body's
+    JSON-RPC method is rejected with 400 / `-32020` (MCP Streamable HTTP
+    §Server Validation). Otherwise a proxy trusting the header and a backend
+    trusting the body could route one request two ways."""
+
     id = "transport-header-body-consistency"
     rubric_id = "TR-05"
     section = _SECTION
     display_order = 705
     method = "Probe"
-    # See TR-01's comment: runs after the lazy --auth trigger so this can
-    # retry authenticated instead of only ever seeing the 401 challenge.
-    order = 463
+    order = 463  # after the --auth trigger (see TR-01)
     title = "Header/body mismatches are rejected"
     spec_level = SpecLevel.MUST
     spec_ref = (
@@ -363,7 +330,7 @@ class HeaderBodyConsistency(Check):
     )
     requires_http = True
 
-    _MISMATCHED_METHOD = "resources/read"  # a real, different MCP method than the body's
+    _MISMATCHED_METHOD = "resources/read"  # a real MCP method, different from the body's
 
     def run(self, target, ctx: ProbeContext):
         if not target.url:
@@ -378,30 +345,14 @@ class HeaderBodyConsistency(Check):
 
         evidence = {
             "used_auth": used_auth,
-            "mcp_session": {"message_url": probe_url, "initialized": session.initialized,
-                            "protocol_version": session.protocol_version, "error": session.error},
+            "mcp_session": session.summary(),
             "baseline": request_evidence("POST", probe_url, base_headers, body, r_baseline),
             "mutated": request_evidence("POST", probe_url, mutated_headers, body, r_mutated),
         }
 
-        if r_baseline.error or r_mutated.error:
-            return self._result(
-                Rating.ERROR,
-                "The baseline or mutated probe failed at the network level; "
-                "see evidence for which.",
-                evidence,
-            )
-
-        if accepted_async(r_baseline, r_mutated):
-            return sse_async_na(self, evidence)
-
-        # The baseline sends Mcp-Method: tools/list matching a tools/list body
-        # — the exact shape proven to work elsewhere in this run. If even that
-        # doesn't reach a 2xx, header/body method-mismatch behavior can't be
-        # isolated from the earlier rejection.
-        na = self.baseline_gate(r_baseline, evidence)
-        if na:
-            return na
+        stop = differential_guard(self, evidence, r_baseline, r_mutated)
+        if stop:
+            return stop
 
         if r_mutated.status == 400:
             err = extract_jsonrpc_error(r_mutated.text)
@@ -445,23 +396,22 @@ class HeaderBodyConsistency(Check):
         )
 
 
-# ---------------------------------------------------------------------------
-# TR-08  Unsupported protocol versions
-#
-# Header and body both get the bogus version, consistently — this isolates
-# version *negotiation*, not header/body *consistency* (TR-05's job).
-# ---------------------------------------------------------------------------
-
 @register
 class UnsupportedVersionError(Check):
+    """TR-08: an unsupported protocol version is rejected with `-32022
+    UnsupportedProtocolVersionError` listing supported versions in
+    `data.supported` (MCP Versioning §Protocol Version Negotiation).
+
+    The bogus version goes in both the header and the body, so this tests
+    version negotiation, not header/body consistency (TR-05).
+    """
+
     id = "transport-unsupported-version-error"
     rubric_id = "TR-08"
     section = _SECTION
     display_order = 708
     method = "Probe"
-    # See TR-01's comment: runs after the lazy --auth trigger so this can
-    # retry authenticated instead of only ever seeing the 401 challenge.
-    order = 465
+    order = 465  # after the --auth trigger (see TR-01)
     title = "Unsupported protocol versions are rejected with a supported-version list"
     spec_level = SpecLevel.MUST
     spec_ref = (
@@ -488,31 +438,14 @@ class UnsupportedVersionError(Check):
 
         evidence = {
             "used_auth": used_auth,
-            "mcp_session": {"message_url": probe_url, "initialized": session.initialized,
-                            "protocol_version": session.protocol_version, "error": session.error},
+            "mcp_session": session.summary(),
             "baseline": request_evidence("POST", probe_url, base_headers, real_body, r_baseline),
             "mutated": request_evidence("POST", probe_url, bogus_headers, bogus_body, r_mutated),
         }
 
-        if r_baseline.error or r_mutated.error:
-            return self._result(
-                Rating.ERROR,
-                "The baseline or mutated probe failed at the network level; "
-                "see evidence for which.",
-                evidence,
-            )
-
-        if accepted_async(r_baseline, r_mutated):
-            return sse_async_na(self, evidence)
-
-        # The baseline sends the real, current protocol version consistently
-        # in both header and body — the exact tools/list shape proven to work
-        # elsewhere in this run. If even that doesn't reach a 2xx,
-        # version-negotiation behavior can't be isolated from the earlier
-        # rejection.
-        na = self.baseline_gate(r_baseline, evidence)
-        if na:
-            return na
+        stop = differential_guard(self, evidence, r_baseline, r_mutated)
+        if stop:
+            return stop
 
         err = extract_jsonrpc_error(r_mutated.text)
         code = err.get("code") if err else None

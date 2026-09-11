@@ -1,21 +1,12 @@
-"""Tool Safety & Blast Radius — how much can this server's tools do?
+"""Tool Safety & Blast Radius — what could go wrong if an agent uses this
+server's tools unsupervised or on adversarial input. Covers unrestricted
+capability, read/write separation, and external-content injection surface.
 
-Once a client can see the server's tools, what could go wrong if an agent
-uses them unsupervised or is fed adversarial input? Covers unrestricted
-capability, the read/write distinction an agent needs to reason about risk,
-and tools whose input can carry untrusted external content into the
-agent's context.
-
-Each check sends a tools/list JSON-RPC request via `_helpers.fetch_tools_authed`,
-using a completed --auth session when one exists. Tagged Method: Auth
-because most servers require a session for tools/list (Supabase does, for
-example) — but these checks don't `requires_auth`-gate: on a server that
-serves tools/list unauthenticated, the check still runs and its evidence
-records "obtained without authentication" rather than the Method tag
-changing per-server. If tools/list genuinely requires a session and none is
-available, the check reports `n/a`. If a completed --auth session *is*
-available and tools/list is still refused, the check reports `error` with
-the exact request/response.
+Each check reads the tool list via `_helpers.fetch_tools_authed`. They are
+tagged Method: Auth but not `requires_auth`-gated: a server that serves
+tools/list unauthenticated is still evaluated, with the evidence noting the
+data was obtained without authentication. tools/list unavailable with no
+session -> n/a; refused despite a session -> error with the request/response.
 
 Spec source: modelcontextprotocol.io/specification/draft/server/tools
 """
@@ -53,6 +44,9 @@ _INJECTION_TOOL_PATTERNS = (
 
 
 def _fetch_error_result(check: Check, err: str, ctx: ProbeContext):
+    """Map a `fetch_tools` error string to a CheckResult. A refusal with an
+    active session is an error (the tool list should have been reachable);
+    everything else is n/a."""
     if err == "stdio-no-http":
         return check._result(
             Rating.NA,
@@ -75,8 +69,6 @@ def _fetch_error_result(check: Check, err: str, ctx: ProbeContext):
             evidence,
         )
     if ctx.auth_session:
-        # A completed --auth session is in hand, yet tools/list still refused
-        # the request.
         return check._result(
             Rating.ERROR,
             f"tools/list was rejected ({err}) even though an authenticated "
@@ -90,12 +82,11 @@ def _fetch_error_result(check: Check, err: str, ctx: ProbeContext):
     )
 
 
-# ---------------------------------------------------------------------------
-# TS-01  Tool blast radius
-# ---------------------------------------------------------------------------
-
 @register
 class ToolBlastRadius(Check):
+    """TS-01: no catch-all tool (raw SQL, arbitrary shell, unrestricted HTTP)
+    is exposed. Least Privilege — tools SHOULD be narrowly scoped."""
+
     id = "tool-blast-radius"
     rubric_id = "TS-01"
     section = _SECTION
@@ -150,12 +141,12 @@ class ToolBlastRadius(Check):
         )
 
 
-# ---------------------------------------------------------------------------
-# TS-02  Read / write separation
-# ---------------------------------------------------------------------------
-
 @register
 class ToolRwSeparation(Check):
+    """TS-02: write/destructive tools are distinguishable from read-only ones
+    by naming, a `readOnlyHint` annotation, or separate toolsets. Least
+    Privilege SHOULD."""
+
     id = "tool-rw-separation"
     rubric_id = "TS-02"
     section = _SECTION
@@ -216,9 +207,8 @@ class ToolRwSeparation(Check):
             )
 
         if readonly_annotated or (read_tools and write_tools):
-            # Report every bucket, not just the naming-convention one — a
-            # server that annotates every read tool with readOnlyHint would
-            # otherwise look like it has zero read tools.
+            # Count both buckets: a server that annotates every read tool with
+            # readOnlyHint would otherwise appear to have no read tools.
             breakdown = []
             if readonly_annotated:
                 breakdown.append(f"{len(readonly_annotated)} via readOnlyHint annotation")
@@ -243,12 +233,12 @@ class ToolRwSeparation(Check):
         )
 
 
-# ---------------------------------------------------------------------------
-# TS-03  Injection surface
-# ---------------------------------------------------------------------------
-
 @register
 class ToolInjectionSurface(Check):
+    """TS-03: tools that pull in untrusted external content (web pages,
+    user-supplied URLs, external queries) are identifiable so their
+    prompt-injection surface can be documented. SHOULD."""
+
     id = "tool-injection-surface"
     rubric_id = "TS-03"
     section = _SECTION

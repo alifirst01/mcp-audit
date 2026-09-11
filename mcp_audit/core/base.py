@@ -34,8 +34,8 @@ class Check(ABC):
     requires_http: bool = False
     requires_auth: bool = False
 
-    # Lower order runs first; discovery checks that populate context come first
-    # so dependent checks can read target.context.
+    # Lower runs first. Discovery checks that populate target.context are
+    # ordered ahead of the checks that read it.
     order: int = 100
 
     def applicable(self, target: Target) -> bool:
@@ -49,19 +49,13 @@ class Check(ABC):
         raise NotImplementedError
 
     def baseline_gate(self, response, evidence: dict) -> CheckResult | None:
-        """Guard for differential (baseline-vs-mutation) checks: the mutation
-        comparison only means something if the baseline request actually
-        reached the behavior under test, and that means a 2xx success.
-
-        Any non-2xx baseline — a 401/403 auth challenge, a 404/405 wrong
-        route or method, a 400 malformed request, a 3xx redirect — means the
-        request was turned away at an earlier stage, so a mutation that
-        reaches the same status proves nothing. A 202 is 2xx but carries no
-        response body (the reply is on a separate SSE stream), so it can't be
-        compared either. In any of these cases this returns an NA result
-        naming the actual baseline status; it returns None (proceed to
-        compare) only for a 2xx-with-body success. Network-level failures are
-        the caller's to handle via `response.error` before calling this."""
+        """Guard for differential (baseline-vs-mutation) checks. Returns None
+        to proceed only when the baseline reached the behavior under test — a
+        2xx with a body. For any other status (auth challenge, wrong
+        route/method, malformed, redirect, or a 202 whose reply is on an SSE
+        stream) the mutation has nothing to be compared against, so this
+        returns an NA result naming the status. Network failures are the
+        caller's to handle via `response.error` first."""
         if 200 <= response.status < 300 and response.status != 202:
             return None
         if response.status == 202:

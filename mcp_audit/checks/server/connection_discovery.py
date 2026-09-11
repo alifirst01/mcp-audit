@@ -1,11 +1,6 @@
-"""Connection & Discovery — will the client connect, and how?
-
-Can a client with no prior knowledge of this server learn that login is
-required, discover its Authorization Server, and determine how it can
-register as a client?
-
-CD-08 (SSRF protections for CIMD retrieval) is planned, not implemented
-here — see admin/checks/server/connection_discovery_planned.py.
+"""Connection & Discovery — can a client with no prior knowledge of this
+server learn that login is required, discover its Authorization Server, and
+determine how to register as a client?
 
 Spec sources:
   modelcontextprotocol.io/specification/draft/basic/authorization
@@ -37,12 +32,11 @@ _SPEC_REG = (
 )
 
 
-# ---------------------------------------------------------------------------
-# CD-01  Does the server clearly say a login is required?
-# ---------------------------------------------------------------------------
-
 @register
 class LoginRequired(Check):
+    """CD-01: an unauthenticated request is rejected with 401. MCP Auth
+    §Overview MUST (403 is the wrong signal for 'not logged in yet')."""
+
     id = "discovery-login-required"
     rubric_id = "CD-01"
     section = _SECTION
@@ -98,12 +92,11 @@ class LoginRequired(Check):
         )
 
 
-# ---------------------------------------------------------------------------
-# CD-02  Does the server publish a standard document naming its login server(s)?
-# ---------------------------------------------------------------------------
-
 @register
 class DiscoversAuthorizationServer(Check):
+    """CD-02: the server publishes RFC 9728 Protected Resource Metadata with
+    an `authorization_servers` array. MCP Auth Discovery MUST."""
+
     id = "discovery-authorization-server"
     rubric_id = "CD-02"
     section = _SECTION
@@ -180,12 +173,11 @@ class DiscoversAuthorizationServer(Check):
         )
 
 
-# ---------------------------------------------------------------------------
-# CD-03  Does the login server publish its own standard configuration?
-# ---------------------------------------------------------------------------
-
 @register
 class AuthorizationServerConfig(Check):
+    """CD-03: the Authorization Server publishes RFC 8414 or OpenID Connect
+    Discovery metadata. MCP Auth Discovery §AS Metadata Discovery MUST."""
+
     id = "discovery-as-config"
     rubric_id = "CD-03"
     section = _SECTION
@@ -272,20 +264,13 @@ class AuthorizationServerConfig(Check):
         )
 
 
-# ---------------------------------------------------------------------------
-# CD-04  Registration mechanism is classified
-#
-# Per the Client Registration spec: "Dynamic Client Registration is
-# deprecated. New implementations should use Client ID Metadata Documents
-# instead. This option remains available for backwards compatibility with
-# authorization servers that do not support Client ID Metadata Documents."
-# Supporting both mechanisms at once is explicitly fine — it's the absence of
-# Client ID Metadata Document support, not the presence of DCR, that this
-# check flags.
-# ---------------------------------------------------------------------------
-
 @register
 class RegistrationPriority(Check):
+    """CD-04: classify how a new client can register. MCP Auth Registration
+    prefers Client ID Metadata Documents; Dynamic Client Registration is
+    deprecated and kept only for backwards compatibility, so advertising both
+    is fine — it is the *absence* of CIMD support that this flags."""
+
     id = "registration-priority"
     rubric_id = "CD-04"
     section = _SECTION
@@ -358,12 +343,11 @@ class RegistrationPriority(Check):
         )
 
 
-# ---------------------------------------------------------------------------
-# CD-05  Does the 401 point the agent to where it can log in?
-# ---------------------------------------------------------------------------
-
 @register
 class LoginPointer(Check):
+    """CD-05: the 401 carries a `resource_metadata` link in WWW-Authenticate
+    so discovery can bootstrap in-band. MCP Auth Discovery SHOULD."""
+
     id = "discovery-login-pointer"
     rubric_id = "CD-05"
     section = _SECTION
@@ -411,12 +395,12 @@ class LoginPointer(Check):
         )
 
 
-# ---------------------------------------------------------------------------
-# CD-06  Is that document reachable both standard ways?
-# ---------------------------------------------------------------------------
-
 @register
 class DualDiscoveryPath(Check):
+    """CD-06: the Protected Resource Metadata is reachable both via the
+    WWW-Authenticate pointer and via the well-known path. MCP Auth Discovery
+    SHOULD (clients may use either)."""
+
     id = "discovery-dual-path"
     rubric_id = "CD-06"
     section = _SECTION
@@ -513,12 +497,12 @@ class DualDiscoveryPath(Check):
         )
 
 
-# ---------------------------------------------------------------------------
-# CD-07  Is that configuration document self-consistent (not a mismatched copy)?
-# ---------------------------------------------------------------------------
-
 @register
 class AuthorizationServerConsistent(Check):
+    """CD-07: the `issuer` in the AS metadata equals the identifier the
+    well-known URL was built from. RFC 8414 §3.3 / OIDC §4.3 MUST — a
+    mismatch is the shape of an AS mix-up/impersonation."""
+
     id = "discovery-as-config-consistent"
     rubric_id = "CD-07"
     section = _SECTION

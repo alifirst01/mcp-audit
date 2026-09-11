@@ -140,7 +140,7 @@ def _method(m: str, rich: bool = True) -> str:
 
 
 def _strip_rubric_id(title: str) -> str:
-    """Remove trailing '(XX-00)' rubric ID from legacy titles."""
+    """Strip a trailing '(XX-00)' rubric ID from a check title."""
     return re.sub(r"\s+\([A-Z]+-\d+\)$", "", title)
 
 
@@ -244,7 +244,7 @@ def _print_report_rich(report) -> None:
 
         _console.print(tbl)
 
-    # ── Orphan results (no section set — legacy or unknown) ───────────────────
+    # ── Results with no section set ──────────────────────────────────────────
     if orphans:
         _console.print()
         _console.rule("[bold dim]Other checks[/bold dim]", align="left")

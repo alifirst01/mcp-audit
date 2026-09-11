@@ -1,20 +1,13 @@
-"""Credential & Token Risk — what credential does the client end up
-holding, and how exposed is it?
+"""Credential & Token Risk — is the access token the client ends up holding
+protected? Covers audience binding, transmission, integrity, per-request
+validation, and lifetime/refresh rotation.
 
-Once login completes, is the resulting access token protected — how long
-does it live, how is it transmitted, is it verified on every use, and can
-the agent's own runtime context expose it? Audience binding (CT-01) and
-token integrity (CT-03) are related but distinct properties — a server can
-verify a token's signature correctly while still failing to check which
-resource it was issued for — so they are checked and reported separately
-rather than one standing in for the other.
+Audience binding (CT-01) and token integrity (CT-03) are checked separately:
+a server can verify a token's signature correctly yet not check which
+resource it was issued for.
 
-CT-06 through CT-15 are planned, not implemented here — see
-admin/checks/server/credential_token_risk_planned.py.
-
-`--auth` triggers core/oauth.py's real flow. If that flow doesn't complete,
-the engine reports the Auth-method checks here as ERROR with the failure
-reason instead of running them — see core/engine.py.
+The Auth-method checks need a completed `--auth` session; the engine reports
+them as ERROR when the flow does not complete.
 
 Spec sources:
   modelcontextprotocol.io/specification/draft/basic/authorization
@@ -39,12 +32,12 @@ _SPEC_SEC = (
 )
 
 
-# ---------------------------------------------------------------------------
-# CT-01  Resource parameter honored — token bound to this server
-# ---------------------------------------------------------------------------
-
 @register
 class ResourceBoundToken(Check):
+    """CT-01: the access token's audience is bound to this server's canonical
+    URI. MCP Auth Security — servers MUST support the `resource` parameter
+    (RFC 8707) and scope the token to it."""
+
     id = "oauth-resource-bound"
     rubric_id = "CT-01"
     section = _SECTION
@@ -98,12 +91,12 @@ class ResourceBoundToken(Check):
         )
 
 
-# ---------------------------------------------------------------------------
-# CT-02  Bearer token delivered via Authorization header, never a query string
-# ---------------------------------------------------------------------------
-
 @register
 class BearerHeaderOnly(Check):
+    """CT-02: the token travels in the `Authorization: Bearer` header only.
+    MCP Auth §Access Token Usage — it MUST NOT be accepted in the URI query
+    string (query strings leak into logs and history)."""
+
     id = "oauth-bearer-header-only"
     rubric_id = "CT-02"
     section = _SECTION
@@ -193,12 +186,12 @@ class BearerHeaderOnly(Check):
         )
 
 
-# ---------------------------------------------------------------------------
-# CT-03  Token integrity is verified
-# ---------------------------------------------------------------------------
-
 @register
 class TokenIntegrityVerified(Check):
+    """CT-03: a tampered copy of the real token is rejected. MCP Auth
+    §Overview — servers MUST validate tokens on every request, so a token
+    that fails verification MUST get 401."""
+
     id = "oauth-token-integrity"
     rubric_id = "CT-03"
     section = _SECTION
@@ -218,13 +211,10 @@ class TokenIntegrityVerified(Check):
         session = ctx.auth_session
         if not session:
             return self._result(Rating.NA, "No completed login session.")
-        # Tampering the token's final segment proves integrity verification,
-        # not audience binding — a server can verify signatures correctly
-        # while still not checking which resource a token was issued for.
+        # Alter only the final 4 chars: this isolates integrity verification
+        # from audience binding (CT-01). request_evidence redacts the whole
+        # Authorization value, so the near-complete real token is never stored.
         tampered = session.access_token[:-4] + ("0000" if session.access_token[-4:] != "0000" else "1111")
-        # tampered is a real token with only the last 4 chars changed;
-        # redact_headers() replaces the whole Authorization value so it
-        # never lands in evidence.
         r = ctx.get(target.url, headers={"Authorization": f"Bearer {tampered}"})
         evidence = request_evidence(
             "GET", target.url, {"Authorization": f"Bearer {tampered}"}, None, r
@@ -254,12 +244,12 @@ class TokenIntegrityVerified(Check):
         )
 
 
-# ---------------------------------------------------------------------------
-# CT-04  Token validated on every request
-# ---------------------------------------------------------------------------
-
 @register
 class TokenCheckedEveryRequest(Check):
+    """CT-04: an obviously invalid bearer token is rejected. MCP Auth
+    §Overview — invalid or expired tokens MUST receive 401; no protected
+    resource is served without a verified token."""
+
     id = "oauth-token-checked-every-request"
     rubric_id = "CT-04"
     section = _SECTION
@@ -298,12 +288,11 @@ class TokenCheckedEveryRequest(Check):
         )
 
 
-# ---------------------------------------------------------------------------
-# CT-05  Short-lived tokens & refresh rotation
-# ---------------------------------------------------------------------------
-
 @register
 class ShortLivedAndRefreshRotates(Check):
+    """CT-05: access tokens are short-lived and refresh tokens rotate on use.
+    MCP Auth Security §Token Lifetime SHOULD (no exact duration is named)."""
+
     id = "oauth-short-lived-refresh"
     rubric_id = "CT-05"
     section = _SECTION
@@ -320,7 +309,7 @@ class ShortLivedAndRefreshRotates(Check):
     requires_http = True
     requires_auth = True
 
-    # mcp-audit's own heuristic for "short-lived," not a specification value.
+    # Local heuristic for "short-lived"; the spec names no threshold.
     _HEURISTIC_CEILING_SECONDS = 3600
 
     def run(self, target, ctx: ProbeContext):
@@ -372,12 +361,9 @@ class ShortLivedAndRefreshRotates(Check):
             refreshed = oauth_module.refresh(ctx, target.context.get("as_metadata", {}), client, session)
             rotated = refreshed.probe_evidence.get("refresh_rotated_token")
             evidence["refresh_rotated_token"] = rotated
-            # Spending the refresh token can invalidate the access token it
-            # replaces on servers with strict rotation (observed on Neon and
-            # Stripe; not on Linear/Sentry). Adopt the freshly-issued session
-            # so every later Auth-method check (initialize, tools/list, the
-            # transport probes) uses the token the AS now considers active —
-            # otherwise this probe silently breaks auth for the rest of the run.
+            # Some servers invalidate the old access token when the refresh
+            # token is spent. Adopt the newly issued session so later
+            # Auth-method checks use the token the AS now considers active.
             if refreshed.probe_evidence.get("refresh_returned_new_access_token"):
                 ctx.auth_session = refreshed
                 evidence["session_adopted_refreshed_token"] = True

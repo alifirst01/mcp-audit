@@ -1,15 +1,9 @@
-"""Authentication & Authorization — how does the client prove identity, and
-what does the token permit?
+"""Authentication & Authorization — can the client complete an
+authorization-code flow safely, and is the resulting grant appropriately
+scoped? Covers PKCE, redirect-URI and issuer validation, and scope surface.
 
-Once a client knows how to register, can it complete an authorization-code
-flow safely, and is the resulting grant appropriately scoped? `--auth`
-executes a complete OAuth 2.1 authorization-code flow with PKCE — see
-docs/METHODOLOGY.md.
-
-`--auth` triggers core/oauth.py's real flow (client registration, a local
-loopback redirect listener, PKCE S256, browser consent). If that flow doesn't
-complete, the engine reports the Auth-method checks here as ERROR with the
-failure reason instead of running them — see core/engine.py.
+The Auth-method checks need a completed `--auth` session (a real OAuth 2.1 +
+PKCE flow via core/oauth.py); the engine reports them as ERROR otherwise.
 
 Spec sources:
   modelcontextprotocol.io/specification/draft/basic/authorization
@@ -39,10 +33,9 @@ _SPEC_SEC = (
     "/security-considerations"
 )
 
-# Status codes observed in the wild for "this authorization request is
-# malformed," independent of vendor — used to detect an inconclusive
-# baseline. Not a JSON-RPC 400; authorization endpoints aren't JSON-RPC, and
-# vendors vary (Supabase's AS uses 422 for a generically malformed request).
+# A generically malformed authorization request comes back as one of these.
+# Authorization endpoints aren't JSON-RPC, and ASes vary between 400 and 422;
+# either means the differential baseline never reached the tested behavior.
 _AS_GENERIC_REJECTION_STATUSES = (400, 422)
 
 
@@ -56,12 +49,12 @@ def _authorize_probe_evidence(url: str, r) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# AA-01  PKCE advertised
-# ---------------------------------------------------------------------------
-
 @register
 class PkceAdvertised(Check):
+    """AA-01: the login server's metadata advertises PKCE with S256. MCP Auth
+    Security §Authorization Code Protection — `code_challenge_methods_supported`
+    MUST include S256."""
+
     id = "oauth-pkce-advertised"
     rubric_id = "AA-01"
     section = _SECTION
@@ -111,21 +104,18 @@ class PkceAdvertised(Check):
         )
 
 
-# ---------------------------------------------------------------------------
-# AA-02  Redirect URI validation
-#
-# Baseline-vs-mutated pattern: a bare crafted authorization request has no
-# baseline to compare against — a generic rejection (many Authorization
-# Servers return the same 4xx for any malformed request) can look identical
-# to a genuine redirect-URI rejection, misattributing the cause. Instead:
-# send a baseline request with the SAME client_id and code_challenge the
-# real flow just used successfully, and the registered redirect URI. Confirm
-# it reaches past generic request validation, then change ONLY the
-# redirect_uri and compare.
-# ---------------------------------------------------------------------------
-
 @register
 class RedirectUriRejected(Check):
+    """AA-02: an unregistered redirect_uri is rejected. MCP Auth Registration
+    — the AS MUST validate exact redirect URIs and reject foreign/open-redirect
+    targets.
+
+    Differential probe: the baseline reuses the client_id, code_challenge, and
+    registered redirect_uri from the completed flow (so a generic malformed-
+    request rejection can't be mistaken for a redirect-URI rejection), then
+    only the redirect_uri is changed.
+    """
+
     id = "oauth-redirect-uri-rejected"
     rubric_id = "AA-02"
     section = _SECTION
@@ -243,12 +233,12 @@ class RedirectUriRejected(Check):
         )
 
 
-# ---------------------------------------------------------------------------
-# AA-03  PKCE enforced
-# ---------------------------------------------------------------------------
-
 @register
 class PkceEnforced(Check):
+    """AA-03: an authorization request with no `code_challenge` is rejected.
+    MCP Auth Security §Authorization Code Protection — PKCE MUST be enforced,
+    not merely advertised."""
+
     id = "oauth-pkce-enforced"
     rubric_id = "AA-03"
     section = _SECTION
@@ -279,14 +269,8 @@ class PkceEnforced(Check):
         if not asm or not client_id or not registered_redirect or not challenge:
             return self._result(Rating.NA, "No completed login session to build this probe from.")
 
-        # Baseline: the same registered redirect_uri the real flow just
-        # used successfully, WITH a valid code_challenge. Mutated: the
-        # identical request with code_challenge removed. Using the real
-        # registered redirect_uri (not a throwaway one) matters — a bare
-        # unregistered redirect_uri could get rejected by AA-02's property
-        # (redirect-URI validation) rather than this check's property
-        # (PKCE), producing exactly the wrong-reason-for-rejection bug this
-        # pattern exists to prevent.
+        # The registered redirect_uri is reused (not a throwaway) so the
+        # mutation can only trip PKCE enforcement, not redirect-URI validation.
         base_params = {
             "response_type": "code",
             "client_id": client_id,
@@ -295,7 +279,7 @@ class PkceEnforced(Check):
         }
         baseline_params = {**base_params, "state": secrets.token_urlsafe(8),
                             "code_challenge": challenge, "code_challenge_method": "S256"}
-        mutated_params = {**base_params, "state": secrets.token_urlsafe(8)}  # no code_challenge at all
+        mutated_params = {**base_params, "state": secrets.token_urlsafe(8)}  # code_challenge omitted
 
         baseline_url = f"{asm['authorization_endpoint']}?{urlencode(baseline_params)}"
         mutated_url = f"{asm['authorization_endpoint']}?{urlencode(mutated_params)}"
@@ -365,12 +349,12 @@ class PkceEnforced(Check):
         )
 
 
-# ---------------------------------------------------------------------------
-# AA-04  Issuer response validation (RFC 9207)
-# ---------------------------------------------------------------------------
-
 @register
 class IssuerResponseValid(Check):
+    """AA-04: the authorization redirect carries an `iss` matching the AS.
+    MCP Auth §Overview / RFC 9207 — `iss` MUST be present and MUST be checked
+    before the code is exchanged."""
+
     id = "oauth-issuer-response-valid"
     rubric_id = "AA-04"
     section = _SECTION
@@ -429,12 +413,11 @@ class IssuerResponseValid(Check):
         )
 
 
-# ---------------------------------------------------------------------------
-# AA-05  Advertised scope surface is bounded
-# ---------------------------------------------------------------------------
-
 @register
 class ScopeSurface(Check):
+    """AA-05: advertised scopes are granular, not broad/write-all. MCP Auth
+    Security §Scope Minimization SHOULD."""
+
     id = "oauth-scope-surface"
     rubric_id = "AA-05"
     section = _SECTION

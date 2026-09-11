@@ -1,8 +1,7 @@
-"""Shared constants and helpers for MCP server checks.
-
-"""
+"""Shared constants and helpers for MCP server checks."""
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Optional
@@ -14,11 +13,9 @@ MCP_VERSION = "2026-07-28"
 
 
 def mcp_post_headers(version: str = MCP_VERSION, method: str = "tools/list") -> dict:
-    """Standard HTTP headers for an MCP POST request. Default method is
-    tools/list — the one JSON-RPC method every check in this project has
-    proven works against real servers (see tools_list_body's docstring).
-    Every transport check builds its own headers from this plus a body from
-    tools_list_body(), never a hand-assembled minimal request."""
+    """The HTTP headers for an MCP JSON-RPC POST. The `Mcp-Method` and
+    `MCP-Protocol-Version` headers mirror the request body and must agree with
+    it; keep the `version`/`method` passed here in sync with the body."""
     return {
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
@@ -28,22 +25,18 @@ def mcp_post_headers(version: str = MCP_VERSION, method: str = "tools/list") -> 
 
 
 def maybe_authed_headers(ctx, headers: dict) -> tuple[dict, bool]:
-    """Merge in the Authorization header from ctx.auth_session if a completed
-    --auth session exists, so a probe can see past a server's
-    401-before-transport-validation ordering instead of only reporting an
-    inconclusive WARN. Returns (headers, used_auth) so the caller can phrase
-    its result around whether credentials were sent."""
+    """Add the bearer token when a completed `--auth` session exists, so a
+    probe can get past servers that reject on auth before validating the
+    property under test. Returns (headers, used_auth)."""
     if ctx.auth_session:
         return {**headers, **ctx.authed_headers()}, True
     return headers, False
 
 
 def redact_headers(headers: dict) -> dict:
-    """Headers dict safe to place in evidence/JSON output. The Authorization
-    value (a live bearer token) is replaced with a marker so findings stay
-    reproducible — a reader knows a token was sent and in what scheme —
-    without the secret itself landing in a report that might be shared or
-    published."""
+    """A copy of `headers` safe for evidence output: the `Authorization` value
+    is replaced with `<scheme> <redacted>` so a reader can see a token was
+    sent, and in what scheme, without the secret itself."""
     out = dict(headers)
     auth = out.get("Authorization")
     if auth:
@@ -53,11 +46,9 @@ def redact_headers(headers: dict) -> dict:
 
 
 def request_evidence(method: str, url: str, headers: dict, body, response) -> dict:
-    """Full request/response evidence for one probe, with any bearer token
-    redacted, so a check's finding can be hand-verified by re-sending the
-    exact same request. Used by every baseline-vs-mutated differential check —
-    see Check.baseline_gate, which gates a conclusion on the baseline here
-    reaching a 2xx."""
+    """A request/response record (bearer token redacted) that lets a finding
+    be reproduced by re-sending the same request. Response body is truncated;
+    callers needing the whole thing capture it separately."""
     return {
         "request_method": method,
         "request_url": url,
@@ -69,25 +60,20 @@ def request_evidence(method: str, url: str, headers: dict, body, response) -> di
 
 
 def parse_jsonrpc_message(text: str) -> dict | None:
-    """Parse one JSON-RPC object from an MCP POST response body, whether the
-    server replied with `application/json` (the body *is* the object) or
-    `text/event-stream` (the object is the `data:` payload of an SSE
-    `message` event — MCP Streamable HTTP lets a server answer a POST with
-    either, and we send `Accept: application/json, text/event-stream`).
-    Returns the last JSON object found, or None."""
-    import json
+    """The JSON-RPC object from an MCP POST response, or None. A server may
+    answer a POST with `application/json` (the body is the object) or
+    `text/event-stream` (the object is the `data:` payload of an SSE event),
+    since we send `Accept: application/json, text/event-stream`. For an SSE
+    body the last object seen is returned."""
     if not text:
         return None
-    stripped = text.lstrip()
-    if stripped[:1] in "{[":
+    if text.lstrip()[:1] in "{[":
         try:
             doc = json.loads(text)
             return doc if isinstance(doc, dict) else None
         except Exception:
             return None
-    # SSE framing: gather consecutive `data:` lines per event; keep the last
-    # payload that parses to a JSON object. `event:` / `id:` / `:comment`
-    # lines are ignored.
+    # SSE: join each event's `data:` lines; keep the last that parses.
     last: dict | None = None
     buf: list[str] = []
     for raw in text.splitlines() + [""]:
@@ -117,18 +103,15 @@ def extract_jsonrpc_error(text: str) -> dict | None:
 
 
 def base_url(url: str) -> str:
-    """Return scheme://netloc with no path component."""
-    from urllib.parse import urlparse
+    """`scheme://netloc` with no path."""
     p = urlparse(url)
     return f"{p.scheme}://{p.netloc}"
 
 
 def tools_list_body(version: str = MCP_VERSION) -> dict:
-    """JSON-RPC body for a tools/list request — the same shape
-    fetch_tools/fetch_tools_authed use to successfully call real servers.
-    Recommended baseline body for any differential check that mutates
-    exactly one property: confirm this succeeds, then change only the one
-    thing under test. Never hand-assemble a bespoke minimal body."""
+    """JSON-RPC body for a tools/list request. `version` sets the protocol
+    version in `params._meta`; it must match the `MCP-Protocol-Version`
+    header (see `mcp_post_headers`)."""
     return {
         "jsonrpc": "2.0",
         "id": 1,
@@ -146,16 +129,13 @@ _INIT_METHOD = "initialize"
 
 
 def initialize_body(version: str = MCP_VERSION) -> dict:
-    """JSON-RPC body for the MCP `initialize` handshake. Sent before
-    tools/list (and the transport probes) because spec-strict servers
-    (Linear, Sentry, Stripe, Neon) reject a bare tools/list until initialize
-    has completed.
+    """JSON-RPC body for the MCP `initialize` handshake. Some servers reject a
+    tools/list issued before initialize completes.
 
-    `method` and `params.protocolVersion` here MUST match the Mcp-Method and
-    MCP-Protocol-Version headers that `_initialize_headers(ctx, version)`
-    builds for the same `version` — a request whose mirrored headers disagree
-    with its body is rejected with `400` (`-32020 HeaderMismatch` or
-    `-32602`). Both sides are derived from `version` so they cannot drift."""
+    `method` and `params.protocolVersion` must match the `Mcp-Method` and
+    `MCP-Protocol-Version` headers from `_initialize_headers(ctx, version)`;
+    a mismatch is rejected with `400` (`-32020`/`-32602`). Both sides derive
+    from `version`."""
     return {
         "jsonrpc": "2.0",
         "id": 0,
@@ -169,13 +149,10 @@ def initialize_body(version: str = MCP_VERSION) -> dict:
 
 
 def _initialize_headers(ctx, version: str = MCP_VERSION) -> tuple[dict, bool]:
-    """Headers for the `initialize` POST: the standard MCP POST headers for
-    `version` + method `initialize` — so the `MCP-Protocol-Version` and
-    `Mcp-Method` headers mirror `initialize_body(version)`'s `protocolVersion`
-    and `method` exactly — plus the bearer token. Neon enforces that these
-    mirrored headers are present and consistent with the body and returns
-    `400` otherwise (Linear/Sentry tolerate their absence, but matching
-    headers satisfy all three). Returns (headers, authorization_sent)."""
+    """Headers for the `initialize` POST — the standard MCP POST headers for
+    `version` and method `initialize`, plus the bearer token. Some servers
+    require the mirrored `MCP-Protocol-Version` / `Mcp-Method` headers to be
+    present and to match the body. Returns (headers, authorization_sent)."""
     headers = mcp_post_headers(version=version, method=_INIT_METHOD)
     if ctx.auth_session:
         headers.update(ctx.authed_headers())
@@ -185,19 +162,20 @@ def _initialize_headers(ctx, version: str = MCP_VERSION) -> tuple[dict, bool]:
 
 @dataclass
 class McpSession:
-    """Everything a JSON-RPC POST to this target needs beyond a token:
-      - ``message_url``: where POSTs go — not the configured URL when that URL
-        is an HTTP+SSE stream (then it's the endpoint the stream announces);
-      - ``protocol_version``: the version ``initialize`` negotiated, to send in
-        the MCP-Protocol-Version header (and mirror in the body) on every
-        later request so header and body stay consistent;
-      - ``session_headers``: any ``Mcp-Session-Id`` ``initialize`` returned
-        that the server expects echoed on every subsequent request;
-      - ``sse``: True when the message endpoint was resolved from an SSE
-        ``endpoint`` event — replies then arrive asynchronously on that
-        stream and a bare POST returns ``202 Accepted``.
+    """What a JSON-RPC POST to this target needs beyond a token, established by
+    the `initialize` handshake and cached on `target.context['mcp_session']`.
 
-    Resolved once per target and cached on ``target.context['mcp_session']``."""
+    - `message_url`: where POSTs go. Differs from the configured URL only when
+      that URL is an HTTP+SSE stream, whose first `endpoint` event names the
+      real POST target.
+    - `protocol_version`: the version `initialize` negotiated. Goes in the
+      `MCP-Protocol-Version` header and the body `_meta` of every later
+      request, which must agree.
+    - `session_headers`: an `Mcp-Session-Id` to echo on later requests, if the
+      server issued one.
+    - `sse`: the message endpoint was resolved from an SSE `endpoint` event,
+      so it replies asynchronously and a bare POST returns `202`.
+    """
     message_url: str
     protocol_version: str = MCP_VERSION
     session_headers: dict = field(default_factory=dict)
@@ -206,6 +184,11 @@ class McpSession:
     accepted_async: bool = False
     error: Optional[str] = None
     evidence: dict = field(default_factory=dict)
+
+    def summary(self) -> dict:
+        """The subset of session state a check puts in its evidence."""
+        return {"message_url": self.message_url, "initialized": self.initialized,
+                "protocol_version": self.protocol_version, "error": self.error}
 
 
 def _is_sse_endpoint(url: str) -> bool:
@@ -220,14 +203,11 @@ def _streamable_http_guess(url: str) -> str:
 
 
 def _resolve_message_url(target, ctx) -> tuple[str, Optional[str], bool]:
-    """Where JSON-RPC POSTs for this target go, and whether that endpoint is a
-    true HTTP+SSE message endpoint (async replies). For a normal
-    Streamable-HTTP endpoint it's the configured URL, replying synchronously.
-    For an `…/sse` endpoint the real message endpoint is announced in the
-    stream's first `endpoint` event; if that handshake can't be completed
-    (e.g. the stream itself needs a token this run doesn't have) fall back to
-    the conventional Streamable-HTTP path. Returns
-    (url, note, via_sse_handshake)."""
+    """(url, note, via_sse_handshake) — where JSON-RPC POSTs for this target
+    go. A Streamable-HTTP endpoint is used as-is. For an `…/sse` endpoint the
+    real POST target comes from the stream's first `endpoint` event; if that
+    handshake can't complete (e.g. the stream itself needs a token), fall back
+    to the conventional `/mcp` path."""
     url = target.url
     if not _is_sse_endpoint(url):
         return url, None, False
@@ -245,12 +225,10 @@ _VERSION_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 def _server_supported_version(jerr: dict) -> Optional[str]:
-    """From an `initialize` JSON-RPC error, return the newest protocol version
-    the server says it supports, or None. Servers put the list in different
-    places — `data.supported`, `data.supportedVersions`, `data.versions`,
-    `data` as a bare list — and some only name it in the message text
-    (Neon's -32000 "Unsupported protocol version" carries the list in
-    `data`). Version strings are ISO dates, so lexicographic max == newest."""
+    """The newest protocol version an `initialize` JSON-RPC error says the
+    server supports, or None. The list may be under `data.supported`,
+    `data.supportedVersions`, `data.versions`, `data` itself, or only in the
+    message text. Versions are ISO dates, so the lexicographic max is newest."""
     if not isinstance(jerr, dict):
         return None
     data = jerr.get("data")
@@ -273,11 +251,10 @@ def _server_supported_version(jerr: dict) -> Optional[str]:
 
 
 def _record_initialize_failure(evidence: dict, r, headers: dict, body: dict) -> tuple[str, Optional[str]]:
-    """Populate `evidence` from a rejected `initialize` (HTTP error, or HTTP
-    200 carrying a JSON-RPC error) and return (err_tag, best_supported_version).
-    `request_evidence` truncates the body to 500 chars; keep the full thing
-    (bounded) and surface the JSON-RPC error so it's diagnosable from the
-    report alone."""
+    """Record a rejected `initialize` (an HTTP error, or an HTTP 200 whose
+    body carries a JSON-RPC error) into `evidence` and return
+    (err_tag, best_supported_version). Keeps the full response body so the
+    rejection is diagnosable from the report alone."""
     evidence["response_body_full"] = (r.text or "")[:4000]
     jerr = extract_jsonrpc_error(r.text)
     if not jerr:
@@ -309,12 +286,10 @@ def mcp_session(target, ctx) -> McpSession:
 
     message_url, resolve_note, via_sse = _resolve_message_url(target, ctx)
 
-    # Negotiate the protocol version. Send our preferred one; if initialize
-    # comes back with a JSON-RPC error naming the server's supported versions
-    # (Neon answers -32000 "Unsupported protocol version" with the list),
-    # retry once with the newest version the server actually supports. Header
-    # and body are always built from the same `init_version`, so the mirrored
-    # MCP-Protocol-Version / Mcp-Method headers agree with the body.
+    # Negotiate the protocol version: send the preferred one, and if the
+    # server rejects it with an error naming the versions it supports, retry
+    # once with the newest of those. Header and body are rebuilt together from
+    # `init_version` each attempt so their versions stay in agreement.
     init_version = MCP_VERSION
     negotiation: list[dict] = []
     r = headers = body = None
@@ -344,9 +319,8 @@ def mcp_session(target, ctx) -> McpSession:
     if resolve_note:
         evidence["endpoint_resolution"] = resolve_note
 
-    # Local, unredacted dump of the initialize exchange (full body, both
-    # verbs) for diagnosing a rejected handshake — only when the operator
-    # sets MCP_AUDIT_DEBUG_TOKENS. Nothing here touches the on-disk evidence.
+    # Unredacted dump of the initialize exchange to stderr for debugging a
+    # rejected handshake; gated on MCP_AUDIT_DEBUG_TOKENS, never in evidence.
     if debug_tokens_enabled() and ctx.auth_session:
         g = ctx.get(message_url, headers=ctx.authed_headers(
             {"Accept": "application/json, text/event-stream"}))
@@ -365,10 +339,8 @@ def mcp_session(target, ctx) -> McpSession:
     if sid:
         session_headers["Mcp-Session-Id"] = sid
 
-    # Default to the last version we actually sent: MCP_VERSION when no
-    # negotiation happened, or the server's own supported version when we
-    # retried with it. A clean initialize may narrow it further via
-    # result.protocolVersion.
+    # The last version actually sent; a successful initialize below replaces
+    # it with the server's negotiated `result.protocolVersion`.
     protocol_version = init_version
     initialized = False
     accepted_async = False
@@ -377,27 +349,21 @@ def mcp_session(target, ctx) -> McpSession:
     if r.error:
         err = f"initialize-request-error:{r.error}"
     elif r.status == 202:
-        # Old HTTP+SSE transport: the server accepted the request and will
-        # deliver the InitializeResult on the SSE stream, which this probe
-        # does not hold open across the POST. "Accepted, reply not captured" —
-        # not a failure.
+        # HTTP+SSE transport: the reply is delivered on the SSE stream, which
+        # this probe does not hold open across the POST. Accepted, not failed.
         accepted_async = True
         initialized = True
         err = "initialize-accepted-async-202"
     elif 200 <= r.status < 300:
         jerr = extract_jsonrpc_error(r.text)
         if jerr:
-            # HTTP 200 carrying a JSON-RPC error body — e.g. a -32000 version
-            # rejection returned inside a 200 rather than as an HTTP error.
+            # A JSON-RPC error carried inside a 200 rather than an HTTP error.
             err, best = _record_initialize_failure(evidence, r, headers, body)
             if best:
                 protocol_version = best
             debug_log(f"initialize {message_url} -> 200 + JSON-RPC error; body: {r.text!r}")
         else:
             initialized = True
-            # The InitializeResult may arrive as plain JSON or SSE-framed
-            # (text/event-stream) — parse both, so the negotiated version is
-            # actually captured and not silently dropped.
             doc = parse_jsonrpc_message(r.text)
             negotiated = ((doc or {}).get("result") or {}).get("protocolVersion")
             if isinstance(negotiated, str) and negotiated:
@@ -413,9 +379,9 @@ def mcp_session(target, ctx) -> McpSession:
             "bearer token — this 401 is expected. Re-run with --auth."
         )
     elif r.status == 401:
-        # The token that GET-based checks accept was rejected on this POST.
-        # Capture a same-token GET beside the POST so the difference is in
-        # evidence (header format / content negotiation / session).
+        # A session exists but the POST was still refused. Capture a GET with
+        # the same token so the report shows whether it's the verb, headers,
+        # or the token itself that the server rejects.
         err = "initialize-status:401"
         get_headers = {**ctx.authed_headers(),
                        "Accept": "application/json, text/event-stream"}
@@ -437,8 +403,7 @@ def mcp_session(target, ctx) -> McpSession:
         debug_log(f"initialize {message_url} -> {r.status}; full body: {r.text!r}")
 
     if initialized and not accepted_async:
-        # Spec: the client MUST send notifications/initialized before issuing
-        # any other request. Best-effort — the response is not needed.
+        # The spec requires notifications/initialized before any other request.
         note_headers = mcp_post_headers(version=protocol_version,
                                         method="notifications/initialized")
         note_headers, _ = maybe_authed_headers(ctx, note_headers)
@@ -465,13 +430,10 @@ def mcp_session(target, ctx) -> McpSession:
 
 def mcp_message_target(target, ctx, method: str = "tools/list") -> tuple[str, dict, bool, McpSession]:
     """(url, headers, used_auth, session) for a JSON-RPC POST probe: the
-    resolved message endpoint, MCP POST headers carrying the **negotiated**
-    protocol version, the Mcp-Session-Id from the initialize handshake, and
-    the bearer token when --auth completed. Every JSON-RPC probe in this
-    project routes through here so SSE endpoints, session ids and the
-    negotiated version are handled in one place. Callers that also send a
-    body must build it with `session.protocol_version` so header and body
-    agree."""
+    resolved endpoint, POST headers at the negotiated protocol version, the
+    `Mcp-Session-Id`, and the bearer token when `--auth` completed. Every
+    JSON-RPC probe routes through here. A caller that also sends a body must
+    build it with `session.protocol_version` so header and body agree."""
     session = mcp_session(target, ctx)
     headers = mcp_post_headers(version=session.protocol_version, method=method)
     headers.update(session.session_headers)
@@ -498,10 +460,27 @@ def sse_async_na(check, evidence: dict):
     )
 
 
+def differential_guard(check, evidence: dict, baseline, *mutated):
+    """Shared early-exit for a differential check: a network failure -> ERROR,
+    a 202 on any probe -> n/a (reply on an SSE stream), a non-2xx baseline ->
+    n/a (never reached the tested behavior). Returns a CheckResult to return
+    immediately, or None to proceed with the comparison."""
+    from ...core.models import Rating
+    if any(r.error for r in (baseline, *mutated)):
+        return check._result(
+            Rating.ERROR,
+            "The baseline or mutated probe failed at the network level; "
+            "see evidence for which.",
+            evidence,
+        )
+    if accepted_async(baseline, *mutated):
+        return sse_async_na(check, evidence)
+    return check.baseline_gate(baseline, evidence)
+
+
 def _tools_from_response(r):
-    """(tools, err) from a tools/list HTTP 200 — body may be plain JSON or
-    SSE-framed. A JSON-RPC error in the body (e.g. -32000) is surfaced, not
-    swallowed as an empty tool list."""
+    """(tools, err) from a tools/list HTTP 200. A JSON-RPC error in the body
+    is surfaced rather than passed off as an empty tool list."""
     doc = parse_jsonrpc_message(r.text)
     if doc is None:
         return None, f"parse-error:unparseable response body ({(r.text or '')[:120]!r})"
@@ -512,22 +491,27 @@ def _tools_from_response(r):
     return tools, None
 
 
-def fetch_tools(target, ctx):
-    """Send tools/list and return (tools, err). err is one of None,
-    'stdio-no-http', 'auth-required', 'request-error:...', 'unexpected-status:N',
-    'parse-error:...', 'jsonrpc-error:...'. Shared by every check that needs
-    the live tool list."""
-    from ...core.models import Transport
-    if target.transport == Transport.STDIO or not target.url:
-        return None, "stdio-no-http"
-
+def _tools_list_request(target, ctx):
+    """POST tools/list to the resolved endpoint at the negotiated version,
+    record evidence, and return the Response."""
     url, headers, _used_auth, session = mcp_message_target(target, ctx, method="tools/list")
     body = tools_list_body(version=session.protocol_version)
     r = ctx.post(url, json_body=body, headers=headers)
     ctx.last_tools_list_evidence = request_evidence("POST", url, headers, body, r)
     if session.evidence:
         ctx.last_tools_list_evidence["initialize"] = session.evidence
+    return r
 
+
+def fetch_tools(target, ctx):
+    """Send tools/list and return (tools, err). err is one of None,
+    'stdio-no-http', 'auth-required', 'request-error:...', 'unexpected-status:N',
+    'parse-error:...', 'jsonrpc-error:...', 'sse-async-not-captured'."""
+    from ...core.models import Transport
+    if target.transport == Transport.STDIO or not target.url:
+        return None, "stdio-no-http"
+
+    r = _tools_list_request(target, ctx)
     if r.error:
         return None, f"request-error:{r.error}"
     if r.status == 202:
@@ -540,23 +524,17 @@ def fetch_tools(target, ctx):
 
 
 def fetch_tools_authed(target, ctx):
-    """Like fetch_tools, but sends the Authorization header from ctx.auth_session.
-    Falls through to the unauthenticated fetch_tools if no session exists."""
+    """Like fetch_tools, but with the bearer token attached. Falls back to the
+    unauthenticated path when no session exists. A 401 here means a session
+    was sent and refused — reported as 'unexpected-status:401', not
+    'auth-required'."""
     from ...core.models import Transport
     if target.transport == Transport.STDIO or not target.url:
         return None, "stdio-no-http"
     if not ctx.auth_session:
         return fetch_tools(target, ctx)
 
-    # mcp_message_target already merges the bearer token via maybe_authed_headers
-    # (ctx.auth_session is set here), plus the Mcp-Session-Id from initialize.
-    url, headers, _used_auth, session = mcp_message_target(target, ctx, method="tools/list")
-    body = tools_list_body(version=session.protocol_version)
-    r = ctx.post(url, json_body=body, headers=headers)
-    ctx.last_tools_list_evidence = request_evidence("POST", url, headers, body, r)
-    if session.evidence:
-        ctx.last_tools_list_evidence["initialize"] = session.evidence
-
+    r = _tools_list_request(target, ctx)
     if r.error:
         return None, f"request-error:{r.error}"
     if r.status == 202:
@@ -567,39 +545,29 @@ def fetch_tools_authed(target, ctx):
 
 
 def obtained_without_auth_note(ctx) -> str:
-    """Detail-text suffix for a check tagged Method: Auth whose data this run
-    happened to obtain without a completed --auth session. Empty string when
-    a session was actually used."""
+    """Detail-text suffix for an Auth-method check whose data was obtained
+    without a completed `--auth` session; empty when a session was used."""
     return "" if ctx.auth_session else " (obtained without authentication)"
 
 
 def decode_jwt_payload(token: str) -> dict | None:
-    """Best-effort, unverified decode of a JWT's payload segment — used only
-    to read informational claims like `aud`. Returns None for an opaque
-    (non-JWT) token; never used to make a trust decision."""
-    import json as _json
+    """Unverified decode of a JWT payload, to read informational claims like
+    `aud`. Returns None for an opaque token; never used for a trust decision."""
     from joserfc.jws import extract_compact
     try:
-        return _json.loads(extract_compact(token.encode()).payload)
+        return json.loads(extract_compact(token.encode()).payload)
     except Exception:
         return None
 
 
 def expected_issuer_from_well_known(well_known_url: str) -> str:
-    """
-    Derive the expected OAuth issuer identifier from a well-known metadata URL.
+    """The OAuth issuer identifier for a well-known metadata URL: per RFC 8414
+    §3.1 and OIDC Discovery §4.1, strip the well-known suffix and, in the
+    path-insertion variant, keep the tenant path that followed it.
 
-    Per RFC 8414 §3.1 and OIDC Discovery §4.1, the issuer is obtained by
-    stripping the well-known suffix (and any path that precedes it in the
-    path-insertion variant) from the URL.
-
-    Examples:
-      https://auth.example.com/.well-known/oauth-authorization-server
-        → https://auth.example.com
-      https://auth.example.com/.well-known/oauth-authorization-server/tenant1
-        → https://auth.example.com/tenant1
-      https://auth.example.com/tenant1/.well-known/openid-configuration
-        → https://auth.example.com/tenant1
+      https://as.example/.well-known/oauth-authorization-server         -> https://as.example
+      https://as.example/.well-known/oauth-authorization-server/tenant1 -> https://as.example/tenant1
+      https://as.example/tenant1/.well-known/openid-configuration       -> https://as.example/tenant1
     """
     _SUFFIXES = (
         "/.well-known/oauth-authorization-server",

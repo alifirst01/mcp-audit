@@ -1,11 +1,8 @@
 """ProbeContext — the shared HTTP layer.
 
-All network I/O for checks flows through here so that:
-  - identical requests are fetched only once per run (cache)
-  - timeouts, TLS, and redirect behaviour are consistent
-
-Unauthenticated GETs, targeted POST probes, and — once `--auth` completes —
-authenticated requests all flow through this shared client.
+All check network I/O flows through here so redirect policy, TLS, timeouts,
+and the GET cache are consistent, and so `--auth` credentials are applied in
+one place.
 """
 from __future__ import annotations
 
@@ -20,10 +17,9 @@ import httpx
 
 
 def debug_tokens_enabled() -> bool:
-    """True when MCP_AUDIT_DEBUG_TOKENS is set — turns on *local, unredacted*
-    logging of token-endpoint responses and outgoing Authorization headers to
-    stderr, for diagnosing why an issued token is rejected. Off by default;
-    never affects evidence written to disk (that stays redacted)."""
+    """True when MCP_AUDIT_DEBUG_TOKENS is set: enables unredacted stderr
+    logging of token responses and Authorization headers for diagnosis. Never
+    affects evidence written to disk."""
     return os.environ.get("MCP_AUDIT_DEBUG_TOKENS", "").strip().lower() in ("1", "true", "yes", "on")
 
 
@@ -43,15 +39,21 @@ class Response:
     def json(self):
         return _json.loads(self.text)
 
+    @classmethod
+    def from_httpx(cls, r: httpx.Response) -> "Response":
+        return cls(
+            status=r.status_code,
+            headers={k.lower(): v for k, v in r.headers.items()},
+            text=r.text,
+            url=str(r.url),
+        )
+
 
 @dataclass
 class AuthSession:
-    """The result of a completed OAuth 2.1 authorization-code flow (see core/oauth.py).
-
-    Populated by `oauth.authenticate()` and stashed on `ProbeContext.auth_session` so
-    every downstream Auth-method check can make authenticated requests without
-    re-running the flow.
-    """
+    """A completed OAuth 2.1 authorization-code flow (see core/oauth.py),
+    stashed on `ProbeContext.auth_session` so Auth-method checks share one
+    session instead of re-running the flow."""
     access_token: str
     token_type: str = "Bearer"
     refresh_token: Optional[str] = None
@@ -61,7 +63,7 @@ class AuthSession:
     issuer: Optional[str] = None
     resource: Optional[str] = None
     obtained_at: float = field(default_factory=time.time)
-    # Full request/response evidence for checks that need to show their work.
+    # Flow request/response details for checks that show their work.
     probe_evidence: dict = field(default_factory=dict)
 
     def expires_at(self) -> Optional[float]:
@@ -78,14 +80,13 @@ class AuthFailure:
 
 @dataclass
 class ProbeContext:
-    """Per-target network context with a small response cache."""
+    """Per-target network context with a small GET response cache."""
     timeout: float = 15.0
     auth_session: Optional[AuthSession] = None
     auth_failure: Optional[AuthFailure] = None
     transport: Optional[httpx.BaseTransport] = None
-    # Request/response evidence for the most recent tools/list attempt, set by
-    # _helpers.fetch_tools / fetch_tools_authed so a check that only gets an
-    # error string back can still show the exact request and the server's reply.
+    # The most recent tools/list request/response, so a check that only
+    # receives an error string can still show it in evidence.
     last_tools_list_evidence: Optional[dict] = None
     _cache: dict[str, Response] = field(default_factory=dict)
     _client: Optional[httpx.Client] = None
@@ -99,118 +100,68 @@ class ProbeContext:
         )
 
     def authed_headers(self, extra: Optional[dict] = None) -> dict:
-        """Merge `Authorization: Bearer <token>` into a headers dict. Raises if no
-        auth session is present — callers must check `self.auth_session` first."""
+        """`extra` plus `Authorization: Bearer <token>`. Raises if there is no
+        auth session, or if the token is blank (a bare `Bearer ` reads to the
+        server as no credential at all)."""
         if not self.auth_session:
             raise RuntimeError("authed_headers() called with no active auth_session")
-        # A blank access token would go out as a bare "Authorization: Bearer "
-        # and read to the server as *no* credential at all ("No authorization
-        # provided"). Fail loudly here instead of shipping an empty bearer.
         token = (self.auth_session.access_token or "").strip()
         if not token:
-            raise RuntimeError(
-                "auth_session.access_token is empty/blank — refusing to send an "
-                "'Authorization: Bearer' header with no token value."
-            )
-        # RFC 6750 §2.1 / §7.1: the OAuth 2.0 bearer scheme is the literal
-        # token "Bearer". Several authorization servers (Sentry, Linear, Neon,
-        # Asana) return `"token_type": "bearer"` lowercase in the token
-        # response; echoing that back verbatim makes their resource servers
-        # reject the request with `401 invalid_token`. Normalize to the
-        # canonical casing so an authenticated request is actually accepted.
+            raise RuntimeError("auth_session.access_token is empty/blank")
+        # RFC 6750 §2.1: the scheme name is "Bearer". Some ASes return
+        # `token_type` lowercase; strict resource servers then 401. Normalize.
         token_type = (self.auth_session.token_type or "Bearer").strip()
         if token_type.lower() == "bearer":
             token_type = "Bearer"
         h = dict(extra or {})
         h["Authorization"] = f"{token_type} {token}"
-        debug_log(
-            f"outgoing Authorization: {token_type} {token!r} "
-            f"(len={len(token)}, empty={not token})"
-        )
+        debug_log(f"outgoing Authorization: {token_type} {token!r} (len={len(token)})")
         return h
+
+    def _send(self, url: str, call) -> Response:
+        try:
+            return Response.from_httpx(call())
+        except Exception as e:
+            return Response(status=0, headers={}, text="", url=url, error=str(e))
 
     def get(self, url: str, headers: Optional[dict] = None) -> Response:
         key = f"GET {url} {sorted((headers or {}).items())}"
-        if key in self._cache:
-            return self._cache[key]
-        try:
-            r = self._client.get(url, headers=headers or {})
-            resp = Response(
-                status=r.status_code,
-                headers={k.lower(): v for k, v in r.headers.items()},
-                text=r.text,
-                url=str(r.url),
-            )
-        except Exception as e:
-            resp = Response(status=0, headers={}, text="", url=url, error=str(e))
-        self._cache[key] = resp
-        return resp
+        if key not in self._cache:
+            self._cache[key] = self._send(url, lambda: self._client.get(url, headers=headers or {}))
+        return self._cache[key]
 
     def post(self, url: str, json_body: Optional[dict] = None,
              headers: Optional[dict] = None) -> Response:
-        """Send an HTTP POST. Callers own the Content-Type via `headers`; a
-        default of application/json is set automatically when json_body is
-        provided and no explicit Content-Type is in headers."""
+        """POST. Content-Type defaults to application/json when `json_body` is
+        given and the caller didn't set one in `headers`."""
         h: dict[str, str] = {}
         if json_body is not None:
             h["Content-Type"] = "application/json"
         h.update(headers or {})
         body_bytes = _json.dumps(json_body).encode() if json_body is not None else None
-        try:
-            r = self._client.post(url, content=body_bytes, headers=h)
-            return Response(
-                status=r.status_code,
-                headers={k.lower(): v for k, v in r.headers.items()},
-                text=r.text,
-                url=str(r.url),
-            )
-        except Exception as e:
-            return Response(status=0, headers={}, text="", url=url, error=str(e))
+        return self._send(url, lambda: self._client.post(url, content=body_bytes, headers=h))
 
     def post_form(self, url: str, data, headers: Optional[dict] = None) -> Response:
-        """Send an application/x-www-form-urlencoded POST — the body shape
-        OAuth token/refresh requests use per RFC 6749, not JSON. Same
-        governed client as every other method (timeout, TLS, redirect
-        policy). `data` may be a dict (form-encoded by httpx) or a
-        pre-encoded query string"""
+        """`application/x-www-form-urlencoded` POST — the body shape OAuth
+        token requests use (RFC 6749). `data` is a dict or a pre-encoded
+        query string."""
         h = {"Content-Type": "application/x-www-form-urlencoded"}
         h.update(headers or {})
-        try:
-            if isinstance(data, (str, bytes)):
-                r = self._client.post(url, content=data, headers=h)
-            else:
-                r = self._client.post(url, data=data, headers=h)
-            return Response(
-                status=r.status_code,
-                headers={k.lower(): v for k, v in r.headers.items()},
-                text=r.text,
-                url=str(r.url),
-            )
-        except Exception as e:
-            return Response(status=0, headers={}, text="", url=url, error=str(e))
+        if isinstance(data, (str, bytes)):
+            return self._send(url, lambda: self._client.post(url, content=data, headers=h))
+        return self._send(url, lambda: self._client.post(url, data=data, headers=h))
 
     def request(self, method: str, url: str,
                 headers: Optional[dict] = None) -> Response:
-        """Send an arbitrary HTTP request (e.g. DELETE, OPTIONS)"""
-        try:
-            r = self._client.request(method.upper(), url, headers=headers or {})
-            return Response(
-                status=r.status_code,
-                headers={k.lower(): v for k, v in r.headers.items()},
-                text=r.text,
-                url=str(r.url),
-            )
-        except Exception as e:
-            return Response(status=0, headers={}, text="", url=url, error=str(e))
+        """An arbitrary method (DELETE, OPTIONS, ...)."""
+        return self._send(url, lambda: self._client.request(method.upper(), url, headers=headers or {}))
 
     def resolve_sse_endpoint(self, url: str, headers: Optional[dict] = None,
                              max_wait: float = 6.0) -> tuple[Optional[str], Optional[str]]:
-        """Open the HTTP+SSE stream at `url` and return
-        (message_endpoint_url, None) taken from its first `endpoint` event —
-        the URL that JSON-RPC POSTs must be sent to under the older
-        HTTP+SSE transport. Returns (None, reason) if the stream can't be
-        opened or names no endpoint. The stream is closed as soon as the
-        endpoint is known; nothing is kept open."""
+        """(message_endpoint_url, None) from the first `endpoint` event of the
+        HTTP+SSE stream at `url` — the URL that JSON-RPC POSTs go to under that
+        transport — or (None, reason). The stream is closed as soon as the
+        endpoint is known."""
         from urllib.parse import urljoin
         h = {"Accept": "text/event-stream"}
         h.update(headers or {})

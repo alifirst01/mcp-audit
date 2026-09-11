@@ -1,45 +1,23 @@
-"""A real OAuth 2.1 + PKCE(S256) authorization-code flow — plus two faster
-paths for servers that don't support self-registration or when the operator
-already has credentials.
+"""OAuth 2.1 + PKCE(S256) authorization-code flow, plus two faster paths.
 
-PKCE, token exchange, refresh, and JWT decoding use Authlib. MCP discovery,
-DCR/CIMD registration, and the loopback listener are implemented here.
+Entry point `authenticate(target, ctx, auth_input=None)`. `AuthInput.mode()`
+picks a path in priority order:
 
-Entry point: `authenticate(target, ctx, auth_input=None)`. `auth_input` is an
-`AuthInput` describing what credential material the operator supplied via the
-CLI (`--token`, `--client-id`/`--client-secret`/`--client-metadata-url`, or
-none). `AuthInput.mode()` resolves which of the three paths applies, checked
-in priority order:
+  1. supplied-token (`--token`): no OAuth flow; the token is used directly.
+     Checks that exercise the authorization flow itself report `n/a`.
+  2. supplied-credentials (`--client-id`/`--client-secret` or
+     `--client-metadata-url`): the full interactive flow with a
+     pre-registered client, for servers without DCR or CIMD.
+  3. auto (bare `--auth`): self-register via CIMD (preferred) or DCR, then
+     run the interactive flow.
 
-  1. **supplied-token** (`--token`): skip the OAuth flow entirely. The
-     supplied token is used directly for every token-dependent check.
-     Checks that test the interactive authorization flow itself (client
-     registration, PKCE enforcement, redirect-URI validation, issuer
-     validation) have nothing to test and report `n/a`.
-  2. **supplied-credentials** (`--client-id`[/`--client-secret`] or
-     `--client-metadata-url`): skip self-registration, run the full
-     interactive flow with the given client identity. For servers that
-     require pre-registration (e.g. GitHub) and don't support Dynamic
-     Client Registration or Client ID Metadata Documents.
-  3. **auto** (bare `--auth`): self-register via Client ID Metadata
-     Documents (preferred) or Dynamic Client Registration (deprecated
-     fallback), then run the full interactive flow.
+On success it sets `ctx.auth_session`; on failure it sets `ctx.auth_failure`
+with a reason (never raises) that downstream checks and the CLI surface.
 
-On success `authenticate()` sets `ctx.auth_session`; on failure it sets
-`ctx.auth_failure` with a human-readable reason so downstream checks can
-report `ERROR` with that reason, and so the CLI can print the reason up
-front — see `core/engine.py` and `cli.py`.
-
-Secrets (`--client-secret`, `--token`) are never written into `evidence`
-dicts, printed to the console, or included in JSON output — only the
-resulting `access_token` is held in memory for the duration of the run
-(tested in tests/test_oauth_no_secret_leak.py). Prefer the
-`MCP_AUDIT_CLIENT_SECRET` / `MCP_AUDIT_TOKEN` environment variables over the
-CLI flags where possible: command-line arguments are visible to other
-processes on the same machine (e.g. via `ps`) and are recorded in shell
-history.
-
-See docs/METHODOLOGY.md "How the OAuth flow works" for the full writeup.
+Secrets never reach evidence, the console, or JSON output — only the
+resulting `access_token` is held in memory (tests/test_oauth_no_secret_leak.py).
+Prefer `MCP_AUDIT_CLIENT_SECRET` / `MCP_AUDIT_TOKEN` over the CLI flags, which
+are visible via `ps` and shell history.
 """
 from __future__ import annotations
 
@@ -64,23 +42,18 @@ LOOPBACK_TIMEOUT_SECONDS = 120
 
 
 def _debug_token_response(stage: str, endpoint: str, doc, chosen: str) -> None:
-    """Local, UNREDACTED dump of a token-endpoint response — only when
-    MCP_AUDIT_DEBUG_TOKENS is set. Shows the full JSON (real token values),
-    which field mcp-audit takes as the bearer, and whether that value is
-    non-empty at send time. Never written to evidence/report files."""
+    """Unredacted dump of a token-endpoint response to stderr, gated on
+    MCP_AUDIT_DEBUG_TOKENS. Never reaches evidence or report files."""
     if not debug_tokens_enabled():
         return
     keys = sorted(doc) if isinstance(doc, dict) else f"<not a JSON object: {type(doc).__name__}>"
     debug_log(f"{stage}: {endpoint}")
     debug_log(f"{stage}: response keys = {keys}")
     debug_log(f"{stage}: full response JSON = {_json.dumps(doc) if isinstance(doc, dict) else doc!r}")
-    debug_log(
-        f"{stage}: bearer is taken from the 'access_token' field ONLY "
-        f"(not id_token / refresh_token / raw body); "
-        f"value={chosen!r} len={len(chosen)} empty={not chosen.strip()}"
-    )
+    debug_log(f"{stage}: bearer=access_token value={chosen!r} len={len(chosen)}")
 
-# RFC 7636 requires 43-128 characters; comfortably within range.
+
+# RFC 7636 requires the code verifier to be 43-128 characters.
 _PKCE_VERIFIER_LENGTH = 48
 
 
@@ -313,9 +286,8 @@ def exchange_code(
             f"{r.status or r.error}: {r.text[:300]}"
         )
     doc = r.json()
-    # The bearer is the `access_token` field, and only that field — never
-    # id_token, never refresh_token, never the raw response. Strip stray
-    # whitespace/newlines a sloppy server might wrap it in.
+    # The bearer is the `access_token` field only — never id_token or
+    # refresh_token. Strip any surrounding whitespace.
     access_token = (doc.get("access_token") or "").strip() if isinstance(doc, dict) else ""
     _debug_token_response("token-exchange", token_endpoint, doc, access_token)
     if not access_token:
@@ -355,10 +327,9 @@ def refresh(ctx: ProbeContext, as_metadata: dict, client: ClientCredentials,
             f"Refresh failed: POST {token_endpoint} -> {r.status or r.error}: {r.text[:300]}"
         )
     doc = r.json()
-    # `.get(key, fallback)` is wrong here: a refresh response that includes
-    # `"access_token": ""` (or null) would then *store the empty value*,
-    # poisoning the session with a blank bearer. Use `or` so any falsy field
-    # falls back to the still-valid current value.
+    # Fall back to the current values with `or`, not `dict.get(k, default)`:
+    # a response with an explicit `"access_token": ""` must not overwrite a
+    # still-valid token with an empty one.
     new_access = (doc.get("access_token") or "").strip() if isinstance(doc, dict) else ""
     new_refresh = (doc.get("refresh_token") or "") or None
     _debug_token_response("token-refresh", token_endpoint, doc, new_access)
@@ -503,13 +474,12 @@ def authenticate(target, ctx: ProbeContext, auth_input: Optional[AuthInput] = No
         session.probe_evidence["client_mechanism"] = client.mechanism
         session.probe_evidence["client_id"] = client.client_id
         session.probe_evidence["auth_mode"] = mode
-        # Kept for downstream checks to build a genuine baseline authorization
-        # request from — same client, same registered redirect, a valid
-        # code_challenge — rather than a bare crafted one.
+        # Kept so AA-02/AA-03 can build a real baseline authorization request
+        # (same client, registered redirect, valid challenge) to mutate.
         session.probe_evidence["registered_redirect_uri"] = loopback.redirect_uri
         session.probe_evidence["pkce_challenge"] = challenge
         ctx.auth_session = session
-        print(f"  Authorized.\n")
+        print("  Authorized.\n")
         _debug_fresh_token_sanity_get(ctx, target)
 
     except Exception as e:
@@ -517,21 +487,14 @@ def authenticate(target, ctx: ProbeContext, auth_input: Optional[AuthInput] = No
 
 
 def _debug_fresh_token_sanity_get(ctx: ProbeContext, target) -> None:
-    """Right after the token is issued (before any check has run), do one
-    plain authenticated GET with it and log the result UNREDACTED — only when
-    MCP_AUDIT_DEBUG_TOKENS is set. This isolates "the issued token is bad" (this
-    GET is 401) from "a later probe spent/tampered it" (this GET is fine but
-    checks fail afterwards)."""
+    """One authenticated GET with the just-issued token, logged to stderr
+    (gated on MCP_AUDIT_DEBUG_TOKENS). Distinguishes a token that is bad at
+    issuance from one a later probe invalidates."""
     if not debug_tokens_enabled() or not target.url:
         return
     try:
         g = ctx.get(target.url, headers=ctx.authed_headers(
             {"Accept": "application/json, text/event-stream"}))
-        debug_log(
-            f"fresh-token sanity GET {target.url} -> {g.status} "
-            f"{(g.text or '')[:200]!r}  "
-            f"(non-401 => the issued token is accepted; 401 => the token "
-            f"itself is being rejected at issuance)"
-        )
+        debug_log(f"fresh-token sanity GET {target.url} -> {g.status} {(g.text or '')[:200]!r}")
     except Exception as e:
         debug_log(f"fresh-token sanity GET raised: {e!r}")
