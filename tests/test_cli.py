@@ -16,7 +16,7 @@ def _args(**overrides):
     defaults = dict(
         url="https://mcp.example.test/mcp", name=None, auth=False,
         token=None, client_id=None, client_secret=None, client_metadata_url=None,
-        out=None,
+        redirect_port=None, out=None,
     )
     defaults.update(overrides)
     return argparse.Namespace(**defaults)

@@ -414,6 +414,7 @@ def _build_auth_input(args) -> AuthInput:
     client_id = args.client_id
     client_secret = args.client_secret or os.environ.get("MCP_AUDIT_CLIENT_SECRET")
     client_metadata_url = args.client_metadata_url
+    redirect_port = args.redirect_port
 
     if client_secret and not client_id:
         print("mcp-audit: --client-secret (or MCP_AUDIT_CLIENT_SECRET) requires --client-id",
@@ -433,6 +434,7 @@ def _build_auth_input(args) -> AuthInput:
         client_id=client_id,
         client_secret=client_secret,
         client_metadata_url=client_metadata_url,
+        redirect_port=redirect_port,
     )
 
 
@@ -603,6 +605,18 @@ def main(argv=None):
              "support Client ID Metadata Documents. Mutually exclusive with "
              "--client-id.",
     )
+    pe.add_argument(
+        "--redirect-port",
+        type=int,
+        help="Bind the OAuth loopback listener to this fixed port instead of "
+             "an OS-assigned one, so the redirect URI "
+             "(http://127.0.0.1:<port>/callback) is stable across runs. Needed "
+             "for providers whose registered redirect URI must match exactly, "
+             "port included (e.g. GitHub OAuth Apps) — pair with --client-id "
+             "using this same port in the app's callback URL. Omit to keep the "
+             "default OS-assigned ephemeral port. Fails clearly if the port is "
+             "already in use, rather than silently picking another one.",
+    )
     pe.add_argument("--out", help="Write the JSON report to this path — the only place each "
                                    "check's full evidence (exact requests/responses) is saved; "
                                    "the console shows only the summary line.")
@@ -617,6 +631,7 @@ def main(argv=None):
     pf.add_argument("--client-secret",
                     help="See `eval --help`. Also MCP_AUDIT_CLIENT_SECRET.")
     pf.add_argument("--client-metadata-url", help="See `eval --help`.")
+    pf.add_argument("--redirect-port", type=int, help="See `eval --help`.")
     pf.add_argument("--out", help="Directory to write one JSON report per server plus "
                                    "summary.json (all servers, one file) — the only place each "
                                    "check's full evidence is saved; the console shows only the "

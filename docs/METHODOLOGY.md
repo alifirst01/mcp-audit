@@ -121,6 +121,19 @@ except client registration is skipped: `ClientCredentials` is built directly
 from the supplied `--client-id`/`--client-secret` (or `--client-metadata-url`,
 used as the `client_id` value.
 
+The loopback listener (`LoopbackServer`, `core/oauth.py`) binds
+`("127.0.0.1", 0)` by default, so its redirect URI's port is OS-assigned and
+different every run — fine for an AS that treats any loopback port as a
+match (RFC 8252 §7.3), but not for a provider whose pre-registered redirect
+URI must match exactly, port included (GitHub OAuth Apps do exact matching
+on the whole URL). `--redirect-port <port>` binds that fixed port instead,
+so `redirect_uri` is `http://127.0.0.1:<port>/callback` on every run and can
+be registered once. If the port is already bound by something else,
+`LoopbackServer` raises immediately naming the port — it never silently
+falls back to a random one, which would otherwise send the AS to a
+different redirect_uri than the one registered and fail well downstream
+with no obvious cause.
+
 ### Path 3 — auto (bare `--auth`, nothing else supplied)
 
 The zero-config path: `register_client()` self-registers via Client

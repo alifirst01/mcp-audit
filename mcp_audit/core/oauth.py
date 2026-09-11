@@ -74,6 +74,9 @@ class AuthInput:
     client_id: Optional[str] = None
     client_secret: Optional[str] = None
     client_metadata_url: Optional[str] = None
+    # Fixed port for the OAuth loopback listener (see LoopbackServer). None
+    # (the default) keeps the OS-assigned ephemeral port, unchanged.
+    redirect_port: Optional[int] = None
 
     def mode(self) -> str:
         if self.token:
@@ -173,13 +176,34 @@ def register_client(
 
 class LoopbackServer:
     """A one-shot HTTP server on 127.0.0.1 that captures the authorization
-    callback's query string, then shuts itself down."""
+    callback's query string, then shuts itself down.
 
-    def __init__(self):
+    `port=0` (the default) binds an OS-assigned ephemeral port, so the
+    redirect URI's port varies between runs — fine for servers that honor
+    RFC 8252's loopback-any-port matching. A fixed `port` gives a stable
+    redirect URI (`http://127.0.0.1:<port>/callback`) across runs, for
+    providers that require an exact pre-registered redirect URI and don't
+    treat a varying port as a match (e.g. GitHub OAuth Apps). If that fixed
+    port is already in use, this raises immediately rather than silently
+    falling back to a random one — a silent fallback would register one
+    redirect_uri and then send the browser to a different one, a mismatch
+    the operator would otherwise have to debug blind."""
+
+    def __init__(self, port: int = 0):
         self.result: Optional[dict] = None
         self._event = threading.Event()
         handler = self._make_handler()
-        self._httpd = http.server.HTTPServer(("127.0.0.1", 0), handler)
+        try:
+            self._httpd = http.server.HTTPServer(("127.0.0.1", port), handler)
+        except OSError as e:
+            if port:
+                raise RuntimeError(
+                    f"Could not bind the OAuth loopback listener to "
+                    f"127.0.0.1:{port} (--redirect-port {port}): {e}. Free "
+                    f"that port, choose a different --redirect-port, or omit "
+                    f"the flag to use an OS-assigned port."
+                ) from e
+            raise
         self.port = self._httpd.server_address[1]
         self.redirect_uri = f"http://127.0.0.1:{self.port}/callback"
 
@@ -405,8 +429,18 @@ def authenticate(target, ctx: ProbeContext, auth_input: Optional[AuthInput] = No
         return
 
     try:
-        loopback = LoopbackServer()
+        loopback = LoopbackServer(port=auth_input.redirect_port or 0)
+    except RuntimeError as e:
+        ctx.auth_failure = AuthFailure(reason=str(e), stage="redirect-port")
+        return
 
+    print(
+        f"\n  Redirect URI: {loopback.redirect_uri}"
+        + (f" (fixed via --redirect-port {auth_input.redirect_port})"
+           if auth_input.redirect_port else " (OS-assigned port; varies each run)")
+    )
+
+    try:
         if mode == "supplied-credentials":
             client_id = auth_input.client_id or auth_input.client_metadata_url
             client = ClientCredentials(

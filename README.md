@@ -57,7 +57,7 @@ own is only needed to trigger Path 3, the zero-credential automatic path:
 | Priority | Path | Flags | Use when |
 |---|---|---|---|
 | 1 | **Static token** | `--token` (or `MCP_AUDIT_TOKEN`) | You already have an access token, PAT, or API key for this server. Skips the OAuth flow entirely — the tool goes straight to the `initialize` handshake with `Authorization: Bearer <token>`, no browser, no registration. Checks that specifically test the OAuth flow itself (PKCE, redirect-URI/issuer validation, refresh rotation) report `n/a` — there's no flow or token lifecycle to probe. |
-| 2 | **Supplied client credentials** | `--client-id` (+ optional `--client-secret` / `MCP_AUDIT_CLIENT_SECRET`), or `--client-metadata-url` | The server requires pre-registration and doesn't support self-registration — e.g. **GitHub**, where you create an OAuth App by hand first. Runs the real interactive login flow, skipping only the registration step. |
+| 2 | **Supplied client credentials** | `--client-id` (+ optional `--client-secret` / `MCP_AUDIT_CLIENT_SECRET`), or `--client-metadata-url`; add `--redirect-port` if the provider needs an exact, pre-registered callback URL | The server requires pre-registration and doesn't support self-registration — e.g. **GitHub**, where you create an OAuth App by hand first. Runs the real interactive login flow, skipping only the registration step. |
 | 3 | **Auto** | `--auth`, nothing else | The server supports self-registration: Client ID Metadata Documents or Dynamic Client Registration. Works out of the box against **Supabase's default auth**, and against **WorkOS, Stytch, Keycloak, or Auth0** deployments with DCR enabled. |
 
 ```bash
@@ -66,13 +66,20 @@ export MCP_AUDIT_TOKEN=napi_your_existing_api_key
 mcp-audit eval --url https://mcp.neon.tech/mcp
 
 # Path 2 — pre-registered app (GitHub requires this; DCR/CIMD aren't available)
+#   By default the loopback listener uses a random OS-assigned port each run,
+#   so the redirect URI's port changes every time — fine for providers that
+#   treat any 127.0.0.1 port as a match, but GitHub OAuth Apps require the
+#   callback URL to match exactly, port included. Use --redirect-port to pin
+#   it to a port you register once.
 #   1. Create an OAuth App in GitHub settings, note its client ID (and secret,
-#      if confidential), and set its callback URL to http://127.0.0.1:*/callback
-#      (or the specific loopback port mcp-audit prints when it starts the flow).
+#      if confidential), and set its callback URL to
+#      http://127.0.0.1:8765/callback (any free port; just be consistent).
 #   2. Run:
 mcp-audit eval --url https://api.githubcopilot.com/mcp \
-  --client-id YOUR_CLIENT_ID
-# add --client-secret (or MCP_AUDIT_CLIENT_SECRET) if the app is confidential
+  --client-id YOUR_CLIENT_ID --redirect-port 8765
+# add --client-secret (or MCP_AUDIT_CLIENT_SECRET) if the app is confidential.
+# Omitting --redirect-port here would give a different port (and therefore a
+# redirect_uri mismatch) on every run.
 
 # Path 3 — auto self-registration (Supabase default / WorkOS / Stytch /
 # Keycloak / Auth0 with DCR enabled) — needs --auth since no credential is given
