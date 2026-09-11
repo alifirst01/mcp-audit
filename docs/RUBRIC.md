@@ -109,7 +109,7 @@ agent's context.
 | :--- | :--- | :--- | :--- |:---------------| :--- | :--- |
 | **TS-01** | No unrestricted-access tools are present | Auth | 🟢 Live | Remote         | No tool name or description indicates unrestricted shell, SQL, or HTTP execution. | *Least Privilege* |
 | **TS-02** | Read and write operations are distinguishable | Auth | 🟢 Live | Remote | Destructive or write-capable tools are distinguishable from read-only tools, by naming convention or the `readOnlyHint` annotation. | *Least Privilege* |
-| **TS-03** | Tools with an external-content injection surface are identifiable | Auth | 🟢 Live | Remote | Tools that retrieve untrusted external content (web search, URL fetch) are identifiable from their name, description, or input schema. | *Prompt-Injection Blast Radius* |
+| **TS-03** | Tools with an external-content injection surface are identifiable | Auth | 🟢 Live | Remote | Tools that retrieve untrusted external content (web search, arbitrary URL fetch) are identifiable from their name, description, or input schema. Covers only the clearly-external case; second-order injection via attacker-planted first-party content (e.g. an issue/comment/email a benign tool reads back) is out of scope and needs manual review. | *Prompt-Injection Blast Radius* |
 
 ---
 

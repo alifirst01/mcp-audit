@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from urllib.parse import urlparse
 
-from ...core.base import Check, register
+from ...core.base import Check, EVIDENCE_NOTE, register
 from ...core.models import Rating, SpecLevel
 from ...core.probe import ProbeContext
 from ._helpers import (
@@ -89,7 +89,7 @@ class ForeignOriginRejected(Check):
             return self._result(
                 Rating.ERROR,
                 "One or more of the three Origin probes failed at the "
-                "network level; see evidence for which.",
+                "network level. " + EVIDENCE_NOTE,
                 evidence,
             )
 
@@ -115,7 +115,7 @@ class ForeignOriginRejected(Check):
                 f"there is nothing for the foreign-Origin variant to be "
                 f"compared against. Not tested"
                 + ("." if used_auth else "; re-run with --auth.")
-                + " See evidence for the full requests and responses.",
+                + " " + EVIDENCE_NOTE,
                 evidence,
             )
 

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 from urllib.parse import urlparse, urlunparse
 
+from ...core.base import EVIDENCE_NOTE
 from ...core.probe import debug_log, debug_tokens_enabled
 
 MCP_VERSION = "2026-07-28"
@@ -184,11 +185,13 @@ class McpSession:
     accepted_async: bool = False
     error: Optional[str] = None
     evidence: dict = field(default_factory=dict)
+    auth_method: str = "none"
 
     def summary(self) -> dict:
         """The subset of session state a check puts in its evidence."""
         return {"message_url": self.message_url, "initialized": self.initialized,
-                "protocol_version": self.protocol_version, "error": self.error}
+                "protocol_version": self.protocol_version, "error": self.error,
+                "auth_method": self.auth_method}
 
 
 def _is_sse_endpoint(url: str) -> bool:
@@ -315,6 +318,7 @@ def mcp_session(target, ctx) -> McpSession:
 
     evidence = request_evidence("POST", message_url, headers, body, r)
     evidence["authorization_sent"] = auth_sent
+    evidence["auth_method"] = auth_method_label(ctx)
     evidence["protocol_negotiation"] = negotiation
     if resolve_note:
         evidence["endpoint_resolution"] = resolve_note
@@ -423,6 +427,7 @@ def mcp_session(target, ctx) -> McpSession:
         accepted_async=accepted_async,
         error=err,
         evidence=evidence,
+        auth_method=auth_method_label(ctx),
     )
     target.context["mcp_session"] = session
     return session
@@ -469,8 +474,8 @@ def differential_guard(check, evidence: dict, baseline, *mutated):
     if any(r.error for r in (baseline, *mutated)):
         return check._result(
             Rating.ERROR,
-            "The baseline or mutated probe failed at the network level; "
-            "see evidence for which.",
+            "The baseline or mutated probe failed at the network level. "
+            + EVIDENCE_NOTE,
             evidence,
         )
     if accepted_async(baseline, *mutated):
@@ -548,6 +553,17 @@ def obtained_without_auth_note(ctx) -> str:
     """Detail-text suffix for an Auth-method check whose data was obtained
     without a completed `--auth` session; empty when a session was used."""
     return "" if ctx.auth_session else " (obtained without authentication)"
+
+
+def auth_method_label(ctx) -> str:
+    """How the current session's token was obtained, for evidence:
+    'static-token' (--token, no OAuth flow ran), 'oauth' (a real
+    authorization-code flow completed), or 'none' (no session)."""
+    if not ctx.auth_session:
+        return "none"
+    if ctx.auth_session.probe_evidence.get("auth_mode") == "supplied-token":
+        return "static-token"
+    return "oauth"
 
 
 def decode_jwt_payload(token: str) -> dict | None:

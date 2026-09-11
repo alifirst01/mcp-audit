@@ -15,7 +15,7 @@ from __future__ import annotations
 import secrets
 from urllib.parse import urlencode, urlparse, parse_qs
 
-from ...core.base import Check, register
+from ...core.base import Check, EVIDENCE_NOTE, register
 from ...core.models import Rating, SpecLevel
 from ...core.probe import ProbeContext
 
@@ -175,8 +175,8 @@ class RedirectUriRejected(Check):
         if r_baseline.error or r_mutated.error:
             return self._result(
                 Rating.ERROR,
-                "The baseline or mutated probe failed at the network level; "
-                "see evidence for which.",
+                "The baseline or mutated probe failed at the network level. "
+                + EVIDENCE_NOTE,
                 evidence,
             )
 
@@ -188,8 +188,8 @@ class RedirectUriRejected(Check):
                 f"successfully, with the registered redirect_uri "
                 f"({registered_redirect}) — itself got HTTP "
                 f"{r_baseline.status}, so redirect-URI validation can't be "
-                f"isolated from this earlier rejection. Not tested; see "
-                f"evidence.",
+                f"isolated from this earlier rejection. Not tested. "
+                + EVIDENCE_NOTE,
                 evidence,
             )
 
@@ -295,8 +295,8 @@ class PkceEnforced(Check):
         if r_baseline.error or r_mutated.error:
             return self._result(
                 Rating.ERROR,
-                "The baseline or mutated probe failed at the network level; "
-                "see evidence for which.",
+                "The baseline or mutated probe failed at the network level. "
+                + EVIDENCE_NOTE,
                 evidence,
             )
 
@@ -307,8 +307,8 @@ class PkceEnforced(Check):
                 f"redirect_uri and a valid code_challenge, the same client "
                 f"the real login flow just used successfully — itself got "
                 f"HTTP {r_baseline.status}, so PKCE-enforcement behavior "
-                f"can't be isolated from this earlier rejection. Not "
-                f"tested; see evidence.",
+                f"can't be isolated from this earlier rejection. Not tested. "
+                + EVIDENCE_NOTE,
                 evidence,
             )
 

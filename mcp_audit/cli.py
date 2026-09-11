@@ -496,12 +496,18 @@ def _cmd_eval(args):
         url=args.url,
         transport=Transport.HTTP if args.url else Transport.UNKNOWN,
     )
+    auth_input = _build_auth_input(args)
+    # Supplying a credential (--token, --client-id, --client-metadata-url) is
+    # itself a request to authenticate — --auth is only needed to trigger the
+    # zero-credential, fully-automatic self-registration path.
+    include_auth = args.auth or auth_input.mode() != "auto"
     with _progress(target.name) as on_result:
-        report = evaluate(target, include_auth=args.auth,
-                           auth_input=_build_auth_input(args), on_result=on_result)
+        report = evaluate(target, include_auth=include_auth,
+                           auth_input=auth_input, on_result=on_result)
     _print_report(report)
     if args.out:
         _write_json(report, args.out)
+        print(f"\nWrote the full report, including every check's evidence, to {args.out}")
 
 
 def _cmd_eval_file(args):
@@ -509,11 +515,14 @@ def _cmd_eval_file(args):
     outdir = pathlib.Path(args.out) if args.out else None
     if outdir:
         outdir.mkdir(parents=True, exist_ok=True)
+    auth_input = _build_auth_input(args)
+    # A supplied credential applies to every target without prompting —
+    # only the no-credential case falls back to asking per target.
+    has_supplied_credential = auth_input.mode() != "auto"
     summary = []
     total = len(targets)
     for i, target in enumerate(targets, start=1):
-        include_auth = _confirm_auth(target.name)
-        auth_input = _build_auth_input(args) if include_auth else None
+        include_auth = has_supplied_credential or _confirm_auth(target.name)
         with _progress(target.name) as on_result:
             report = evaluate(target, include_auth=include_auth, auth_input=auth_input,
                                on_result=on_result)
@@ -524,7 +533,10 @@ def _cmd_eval_file(args):
             _write_json(report, str(outdir / f"{_slug(target.name)}.json"))
     if outdir:
         (outdir / "summary.json").write_text(json.dumps(summary, indent=2))
-        print(f"\nWrote {len(summary)} reports + summary.json to {outdir}")
+        print(
+            f"\nWrote {len(summary)} per-server report(s) and summary.json "
+            f"(all servers, evidence included) to {outdir}/"
+        )
 
 
 def _slug(name: str) -> str:
@@ -551,18 +563,21 @@ def main(argv=None):
     pe.add_argument("--name", help="Display name.")
     pe.add_argument("--auth", action="store_true",
                     help="Authenticate before running the checks that need a "
-                         "completed session. Picks a credential path in priority "
-                         "order: --token, then --client-id/--client-metadata-url, "
-                         "then fully-automatic self-registration. See "
-                         "docs/METHODOLOGY.md 'How the OAuth flow works'.")
+                         "completed session. Only needed for the fully-automatic, "
+                         "zero-credential self-registration path — supplying "
+                         "--token, --client-id, or --client-metadata-url already "
+                         "authenticates on its own. See docs/METHODOLOGY.md "
+                         "'How the OAuth flow works'.")
     pe.add_argument(
         "--token",
-        help="Priority 1: use this access token/PAT directly and skip the OAuth "
-             "flow entirely — only token- and tool-dependent checks run; checks "
-             "that test the authorization flow itself report n/a. Prefer the "
-             "MCP_AUDIT_TOKEN environment variable over this flag: command-line "
-             "arguments are visible to other processes (e.g. `ps`) and land in "
-             "shell history.",
+        help="Priority 1: use this access token/PAT/API key directly as "
+             "'Authorization: Bearer <value>' and skip the OAuth flow entirely "
+             "(no --auth needed) — only checks that need a token mcp-audit "
+             "itself issued (the interactive flow, refresh rotation) report "
+             "n/a; everything else, including initialize and tools/list, runs "
+             "normally. Prefer the MCP_AUDIT_TOKEN environment variable over "
+             "this flag: command-line arguments are visible to other processes "
+             "(e.g. `ps`) and land in shell history.",
     )
     pe.add_argument(
         "--client-id",
@@ -588,7 +603,9 @@ def main(argv=None):
              "support Client ID Metadata Documents. Mutually exclusive with "
              "--client-id.",
     )
-    pe.add_argument("--out", help="Write JSON report to this path.")
+    pe.add_argument("--out", help="Write the JSON report to this path — the only place each "
+                                   "check's full evidence (exact requests/responses) is saved; "
+                                   "the console shows only the summary line.")
     pe.set_defaults(func=_cmd_eval)
 
     pf = sub.add_parser("eval-file", help="Bulk-evaluate servers from a YAML/JSON file.")
@@ -600,7 +617,10 @@ def main(argv=None):
     pf.add_argument("--client-secret",
                     help="See `eval --help`. Also MCP_AUDIT_CLIENT_SECRET.")
     pf.add_argument("--client-metadata-url", help="See `eval --help`.")
-    pf.add_argument("--out", help="Directory to write per-server + summary JSON.")
+    pf.add_argument("--out", help="Directory to write one JSON report per server plus "
+                                   "summary.json (all servers, one file) — the only place each "
+                                   "check's full evidence is saved; the console shows only the "
+                                   "summary line.")
     pf.set_defaults(func=_cmd_eval_file)
 
     pr = sub.add_parser("rubric", help="Print the spec-aligned rubric in section order.")

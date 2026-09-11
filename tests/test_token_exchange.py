@@ -135,3 +135,23 @@ def test_ct05_adopts_refreshed_session_so_later_checks_use_the_live_token():
     assert ctx.auth_session.refresh_token == "RT-fresh"
     assert result.evidence.get("session_adopted_refreshed_token") is True
     ctx.close()
+
+
+# --- static token (--token): no OAuth lifecycle to test on CT-05 ---------
+
+def test_ct05_static_token_reports_na_not_warn_or_manual():
+    from mcp_audit.checks.server.credential_token_risk import ShortLivedAndRefreshRotates
+    from mcp_audit.core.models import Rating, Target, Transport
+
+    ctx = ProbeContext()
+    ctx.auth_session = AuthSession(access_token="napi_realkey", token_type="Bearer",
+                                    probe_evidence={"auth_mode": "supplied-token"})
+    target = Target(name="t", url="https://rs.test/mcp", transport=Transport.HTTP)
+    target.context = {}
+
+    result = ShortLivedAndRefreshRotates().run(target, ctx)
+
+    assert result.rating == Rating.NA
+    assert "no OAuth token lifecycle" in result.detail
+    assert result.evidence["auth_method"] == "static-token"
+    ctx.close()

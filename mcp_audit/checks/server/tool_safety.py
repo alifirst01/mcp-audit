@@ -12,10 +12,10 @@ Spec source: modelcontextprotocol.io/specification/draft/server/tools
 """
 from __future__ import annotations
 
-from ...core.base import Check, register
+from ...core.base import Check, EVIDENCE_NOTE, register
 from ...core.models import Rating, SpecLevel
 from ...core.probe import ProbeContext
-from ._helpers import fetch_tools_authed as fetch_tools, obtained_without_auth_note
+from ._helpers import auth_method_label, fetch_tools_authed as fetch_tools, obtained_without_auth_note
 
 _SECTION = "Tool Safety & Blast Radius"
 
@@ -31,15 +31,12 @@ _BLAST_PATTERNS = (
 )
 
 # Parameter names that often carry untrusted external content.
-_INJECTION_PARAM_PATTERNS = (
-    "url", "uri", "href", "query", "content", "html", "body",
-    "text", "input", "prompt", "message", "instructions",
-)
+_INJECTION_PARAM_PATTERNS = ("url", "uri", "href", "link", "endpoint")
 
 # Tool names suggesting they fetch untrusted external data.
 _INJECTION_TOOL_PATTERNS = (
-    "web_search", "search", "fetch_url", "read_url", "browse",
-    "http_get", "scrape", "crawl",
+    "web_search", "fetch_url", "read_url", "browse",
+    "http_get", "scrape", "crawl", "fetch", "open_url",
 )
 
 
@@ -73,8 +70,7 @@ def _fetch_error_result(check: Check, err: str, ctx: ProbeContext):
             Rating.ERROR,
             f"tools/list was rejected ({err}) even though an authenticated "
             f"session is available, so the tool list could not be inspected. "
-            f"The exact request sent and the server's response are in the "
-            f"evidence below.",
+            + EVIDENCE_NOTE,
             evidence,
         )
     return check._result(
@@ -121,6 +117,7 @@ class ToolBlastRadius(Check):
             "total_tools": len(tools),
             "flagged_tools": flagged,
             "authenticated": bool(ctx.auth_session),
+            "auth_method": auth_method_label(ctx),
             "endpoint": target.url,
         }
 
@@ -193,6 +190,7 @@ class ToolRwSeparation(Check):
             "read_tools": read_tools,
             "readonly_annotated": readonly_annotated,
             "authenticated": bool(ctx.auth_session),
+            "auth_method": auth_method_label(ctx),
             "endpoint": target.url,
         }
 
@@ -236,8 +234,17 @@ class ToolRwSeparation(Check):
 @register
 class ToolInjectionSurface(Check):
     """TS-03: tools that pull in untrusted external content (web pages,
-    user-supplied URLs, external queries) are identifiable so their
-    prompt-injection surface can be documented. SHOULD."""
+    arbitrary/user-supplied URLs, open-web search) are identifiable so their
+    prompt-injection surface can be documented. SHOULD.
+
+    Scope: this is a name/description/schema heuristic and only covers the
+    clearly-external case — a tool that fetches an arbitrary URL or crawls
+    the open web. Second-order injection via attacker-planted first-party
+    content (a prompt injection hidden in an issue body, comment, or email
+    that a benign-looking tool like `get_issue` reads back) is not
+    detectable this way and is out of scope for automated detection; it
+    requires manual review of what each tool's response actually returns.
+    """
 
     id = "tool-injection-surface"
     rubric_id = "TS-03"
@@ -270,7 +277,10 @@ class ToolInjectionSurface(Check):
 
             name_match = any(p in name for p in _INJECTION_TOOL_PATTERNS)
             param_match = any(p in props_lower for p in _INJECTION_PARAM_PATTERNS)
-            desc_match = any(p in desc for p in ("url", "web", "search", "external", "browse"))
+            desc_match = any(p in desc for p in (
+                "arbitrary url", "any url", "web page", "webpage", "the web",
+                "external website", "third-party", "internet", "crawl",
+            ))
 
             if name_match or (param_match and desc_match):
                 flagged.append({
@@ -284,6 +294,7 @@ class ToolInjectionSurface(Check):
             "total_tools": len(tools),
             "injection_surface_tools": flagged,
             "authenticated": bool(ctx.auth_session),
+            "auth_method": auth_method_label(ctx),
             "endpoint": target.url,
         }
 

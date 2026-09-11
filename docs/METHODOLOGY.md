@@ -58,19 +58,17 @@ confirmed-successful baseline, a rejected mutation is ambiguous evidence.
 ## Evidence requirement
 
 Every check result records the exact request(s) sent and response(s)
-received — method, URL, headers (bearer tokens redacted to
-`Bearer <redacted>`), body, response status, and a
-response-body snippet — for both the baseline and the mutation on every
-differential-testing check, so any finding is independently reproducible.
-Every result's `evidence` object, along with `spec_ref`, is included in the JSON output (`--out`).
+received (method, URL, headers with bearer tokens redacted, body, status,
+a response-body snippet) for both the baseline and the mutation, so any
+finding is independently reproducible.
 
-The console output only prints each check's
-human-readable `detail` line; the full evidence object persists only when `--out` is passed:
-- `mcp-audit eval ... --out report.json` writes one JSON file at that path,
-  containing every check's `evidence`.
-- `mcp-audit eval-file servers.yaml --out results/` writes one JSON file
-  per server into `results/` (named from the target's `name`, e.g.
-  `results/github-mcp.json`)
+The console only prints a check's details and results, never its `evidence`
+object. Evidence is exported to a JSON file when `--out` is passed:
+
+- `mcp-audit eval --url https://mcp.example.com/mcp --name "My Server" --auth --out report.json
+` writes the evidence file at `report.json`
+- `mcp-audit eval-file servers/servers.yaml --out results/` writes one evidence file per server into `results/` plus
+`results/summary.json`.
 
 ---
 
@@ -91,15 +89,28 @@ flow and handles a real user access token.
 
 ## How the OAuth flow works
 
-`--auth` supports three credential paths via `AuthInput`
-(`mcp_audit/core/oauth.py`), resolved in priority order:
+Three credential paths, via `AuthInput` (`mcp_audit/core/oauth.py`),
+resolved in priority order. Supplying a credential (`--token`, `--client-id`,
+`--client-metadata-url`) authenticates on its own; bare `--auth` is only
+needed to select Path 3, the zero-credential automatic path.
 
-### Path 1 — supplied token (`--token` / `MCP_AUDIT_TOKEN`)
+### Path 1 — static token (`--token` / `MCP_AUDIT_TOKEN`)
 
 Highest priority. If a token is supplied, `_authenticate_with_supplied_token()`
 builds an `AuthSession` directly from it — no discovery requirement, no
-network calls, no browser. The session's `resource` is
-set to the target URL for the checks that compare it against a claim.
+network calls, no browser, no `--auth` flag needed. The session's `resource`
+is set to the target URL for the checks that compare it against a claim,
+and `probe_evidence["auth_mode"] = "supplied-token"` marks it so later
+checks can tell (surfaced in evidence as `auth_method: "static-token"`,
+vs. `"oauth"` for the other two paths).
+
+The token is used as-is for the `initialize` handshake and every
+authenticated request after it (tools/list, transport probes, CT-01/03/04)
+exactly like an OAuth-obtained token. Only checks that need a token
+mcp-audit itself issued report `n/a` instead of running: AA-02/03/04 (no
+interactive flow occurred to probe PKCE/redirect-URI/issuer handling) and
+CT-05 (no OAuth token response exists to check `expires_in` or test
+refresh rotation against).
 
 ### Path 2 — supplied client credentials (`--client-id`/`--client-secret`, or `--client-metadata-url`)
 
@@ -341,9 +352,6 @@ MCP endpoint. Expects HTTP 401. No known limitation.
 
 ### CT-05 — Access tokens are short-lived and refresh tokens rotate (`oauth-short-lived-refresh`)
 
-
-
-
 Reads `expires_in` from the token response. If a
 `refresh_token` was issued, calls `oauth.refresh()` and checks whether the
 returned `refresh_token` differs from the one submitted.
@@ -358,11 +366,12 @@ MCP specification requirement. The rotation half of this check (refresh tokens
 SHOULD rotate on each use for public clients) is a direct, unambiguous 
 MCP specification statement with no heuristic involved.
 
-**Limitation:** Reported as `MANUAL`/`WARN` if no refresh token was issued;
-rotation cannot be evaluated. Under Path 1 (supplied token), there is
-normally no associated refresh token either, so this is the expected
-outcome rather than a server deficiency — the detail text says so
-explicitly.
+**Limitation:** Reported as `MANUAL`/`WARN` if no refresh token was issued.
+**Under Path 1 (static token):** reports `n/a` immediately — "Static token
+supplied; no OAuth token lifecycle to test" — rather than evaluating
+`expires_in`/refresh at all: a supplied API key has no OAuth token response
+whose lifetime or rotation could be measured, so there is nothing here to
+grade as MANUAL or WARN.
 
 ### CT-06 — Granted scope does not exceed the requested scope (`oauth-scope-not-overgranted`)
 
@@ -454,14 +463,27 @@ doesn't misleadingly read as "0 read tools detected."
 
 ### TS-03 — Tools with an external-content injection surface are identifiable (`tool-injection-surface`)
 
+Flags tools matching fetch/browse/crawl name patterns (`web_search`,
+`fetch_url`, `scrape`) or whose input schema includes a parameter commonly
+carrying external content (`url`, `uri`, `href`, `link`, `endpoint`)
+combined with a description that names an untrusted external boundary
+("arbitrary url", "web page", "the web", "third-party", "internet", …).
 
-Flags tools matching fetch/browse
-name patterns (`web_search`, `fetch_url`, `scrape`) or whose input schema
-includes parameters commonly carrying external content (`url`, `query`,
-`html`) combined with a description referencing web or external content.
+**Scope:** this is a name/description/schema keyword heuristic, and by
+design only covers the clearly-external case — a tool that fetches an
+arbitrary or user-supplied URL, or crawls/searches the open web.
+Second-order prompt injection via attacker-planted *first-party* content
+(a malicious instruction hidden inside an issue body, comment, or email
+that a benign-looking tool like `get_issue` reads back into the agent's
+context) cannot be detected this way, since nothing about that tool's
+name, description, or schema looks external. That case is out of scope
+for automated detection and needs manual review of what each tool's
+response actually contains.
 
-**Limitation:** A keyword heuristic; confirm manually whether the flagged
-input can carry content into the agent's context.
+**Limitation:** A keyword heuristic; confirm manually whether a flagged
+tool's input can actually carry content into the agent's context, and
+don't rely on a PASS here to mean the server has no injection surface at
+all — only that no *clearly-external* one was found by name/schema.
 
 ---
 

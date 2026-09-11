@@ -17,6 +17,7 @@ from mcp_audit.checks.server._helpers import (
     _server_supported_version,
     _streamable_http_guess,
     accepted_async,
+    auth_method_label,
     fetch_tools_authed,
     mcp_message_target,
     mcp_session,
@@ -439,6 +440,42 @@ def test_mcp_session_is_cached_handshake_runs_once():
 def test_streamable_http_guess():
     assert _streamable_http_guess("https://mcp.asana.com/sse") == "https://mcp.asana.com/mcp"
     assert _streamable_http_guess("https://x.test/sse/") == "https://x.test/mcp"
+
+
+def test_auth_method_label():
+    ctx = ProbeContext()
+    assert auth_method_label(ctx) == "none"
+
+    ctx.auth_session = AuthSession(access_token="tok", token_type="Bearer",
+                                   probe_evidence={"auth_mode": "supplied-token"})
+    assert auth_method_label(ctx) == "static-token"
+
+    ctx.auth_session = AuthSession(access_token="tok", token_type="Bearer",
+                                   probe_evidence={"auth_mode": "auto"})
+    assert auth_method_label(ctx) == "oauth"
+    ctx.close()
+
+
+def test_static_token_session_reports_auth_method_end_to_end():
+    """--token (no OAuth flow) must still complete initialize and tools/list,
+    and every check's evidence should say auth_method: static-token."""
+    server = FakeServer(require_session_id=False)
+    target = _target("https://mcp.example.test/mcp")
+    ctx = ProbeContext(transport=server.transport)
+    ctx.auth_session = AuthSession(access_token="napi_realkey", token_type="Bearer",
+                                   probe_evidence={"auth_mode": "supplied-token"})
+
+    tools, err = fetch_tools_authed(target, ctx)
+
+    assert err is None and [t["name"] for t in tools] == ["read_thing"]
+    session = target.context["mcp_session"]
+    assert session.initialized is True
+    assert session.auth_method == "static-token"
+    assert session.summary()["auth_method"] == "static-token"
+    # the initialize POST itself carried the supplied token, not a browser flow
+    init = next(r for r in server.requests if _body_method(r) == "initialize")
+    assert init.headers.get("authorization") == "Bearer napi_realkey"
+    ctx.close()
 
 
 def test_accepted_async_predicate():

@@ -6,6 +6,13 @@ from abc import ABC, abstractmethod
 from .models import CheckResult, Rating, SpecLevel, Target
 from .probe import ProbeContext
 
+# Console output shows only a result's `detail` line; the full evidence dict
+# (exact requests/responses) is written to disk only when a run is passed
+# --out (`eval --out report.json`, or `eval-file --out results/` — which
+# writes both a per-server results/<name>.json and results/summary.json).
+# See docs/METHODOLOGY.md "Evidence requirement".
+EVIDENCE_NOTE = "See this check's evidence (saved to the JSON report with --out) for the exact request/response."
+
 _REGISTRY: list[type["Check"]] = []
 
 
@@ -66,7 +73,7 @@ class Check(ABC):
         elif response.status in (401, 403):
             tail = " Re-run with --auth."
         else:
-            tail = " See evidence for the full request and response."
+            tail = " " + EVIDENCE_NOTE
         return self._result(
             Rating.NA,
             f"The baseline request did not reach a usable 2xx success status "

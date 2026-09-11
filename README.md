@@ -43,25 +43,27 @@ mcp-audit eval-file servers/servers.yaml --out results/
 mcp-audit rubric
 ```
 
-## Authenticating (`--auth`)
+## Authenticating (`--auth`, or just a credential flag)
 
-`--auth` unlocks §2–3 (Authentication & Authorization, Credential & Token
-Risk) and the Auth-tagged checks in §4 (Tool Safety & Blast Radius). Not every
-server can be driven the same way, so `--auth` supports three credential
+Authenticating unlocks §2–3 (Authentication & Authorization, Credential &
+Token Risk) and the Auth-tagged checks in §4 (Tool Safety & Blast Radius).
+Not every server can be driven the same way, so there are three credential
 paths. Add flags to tell it which one to use; **if you supply more than one,
 this priority order decides which wins** (mcp-audit prints a warning and
-ignores the rest):
+ignores the rest). Supplying a credential (`--token`, `--client-id`, or
+`--client-metadata-url`) is itself enough to authenticate — `--auth` on its
+own is only needed to trigger Path 3, the zero-credential automatic path:
 
 | Priority | Path | Flags | Use when |
 |---|---|---|---|
-| 1 | **Supplied token** | `--token` (or `MCP_AUDIT_TOKEN`) | You already have an access token or PAT for this server. Skips the OAuth flow entirely — fastest path, and the only one that needs no browser. |
+| 1 | **Static token** | `--token` (or `MCP_AUDIT_TOKEN`) | You already have an access token, PAT, or API key for this server. Skips the OAuth flow entirely — the tool goes straight to the `initialize` handshake with `Authorization: Bearer <token>`, no browser, no registration. Checks that specifically test the OAuth flow itself (PKCE, redirect-URI/issuer validation, refresh rotation) report `n/a` — there's no flow or token lifecycle to probe. |
 | 2 | **Supplied client credentials** | `--client-id` (+ optional `--client-secret` / `MCP_AUDIT_CLIENT_SECRET`), or `--client-metadata-url` | The server requires pre-registration and doesn't support self-registration — e.g. **GitHub**, where you create an OAuth App by hand first. Runs the real interactive login flow, skipping only the registration step. |
-| 3 | **Auto** | *(none — bare `--auth`)* | The server supports self-registration: Client ID Metadata Documents or Dynamic Client Registration. Works out of the box against **Supabase's default auth**, and against **WorkOS, Stytch, Keycloak, or Auth0** deployments with DCR enabled. |
+| 3 | **Auto** | `--auth`, nothing else | The server supports self-registration: Client ID Metadata Documents or Dynamic Client Registration. Works out of the box against **Supabase's default auth**, and against **WorkOS, Stytch, Keycloak, or Auth0** deployments with DCR enabled. |
 
 ```bash
-# Path 1 — paste a token you already have (fastest; no browser)
-export MCP_AUDIT_TOKEN=ghp_your_existing_token
-mcp-audit eval --url https://api.githubcopilot.com/mcp --auth
+# Path 1 — paste a token/API key you already have (fastest; no browser, no --auth needed)
+export MCP_AUDIT_TOKEN=napi_your_existing_api_key
+mcp-audit eval --url https://mcp.neon.tech/mcp
 
 # Path 2 — pre-registered app (GitHub requires this; DCR/CIMD aren't available)
 #   1. Create an OAuth App in GitHub settings, note its client ID (and secret,
@@ -69,11 +71,11 @@ mcp-audit eval --url https://api.githubcopilot.com/mcp --auth
 #      (or the specific loopback port mcp-audit prints when it starts the flow).
 #   2. Run:
 mcp-audit eval --url https://api.githubcopilot.com/mcp \
-  --auth --client-id YOUR_CLIENT_ID
+  --client-id YOUR_CLIENT_ID
 # add --client-secret (or MCP_AUDIT_CLIENT_SECRET) if the app is confidential
 
 # Path 3 — auto self-registration (Supabase default / WorkOS / Stytch /
-# Keycloak / Auth0 with DCR enabled) — no extra flags needed
+# Keycloak / Auth0 with DCR enabled) — needs --auth since no credential is given
 mcp-audit eval --url https://your-supabase-project.mcp.example.com/mcp --auth
 ```
 
@@ -82,10 +84,20 @@ environment variables over the `--token` / `--client-secret` flags where you
 can. Command-line arguments are visible to other processes on the same
 machine (e.g. via `ps`) and get recorded in shell history; environment
 variables set in the calling shell are not. mcp-audit never writes either
-value — nor the access token obtained via `--auth` — into the JSON `--out`
-report or the console: the report and default console output carry only
-the resulting evidence (status codes, header values, claims), never the raw
-token or secret.
+value — nor the access token obtained via `--auth` — into the console
+output or the JSON report saved by `--out`: only the resulting evidence
+(status codes, header values, claims), never the raw token or secret. See
+"Where evidence lives" below for exactly which file that ends up in.
+
+**Where evidence lives:** the console only ever prints each check's
+human-readable summary line — it never prints the underlying request/
+response evidence. That evidence exists only in memory unless you pass
+`--out`, in which case it's written to disk: `eval --out report.json`
+writes one file at that path; `eval-file --out results/` writes one file
+per server into the `results/` directory *plus* `results/summary.json`,
+which holds every server's full report (evidence included) in one file.
+Without `--out`, evidence is generated during the run but never saved
+anywhere.
 
 **If authentication doesn't complete** — the server needs a path you didn't
 supply, a supplied client ID is invalid, the browser never redirected back,
@@ -97,10 +109,13 @@ misleading `n/a`s.
 Whichever path completes, checks that specifically test the *interactive
 authorization flow* (PKCE enforcement, redirect-URI validation, issuer
 validation — the parts of §2 Authentication & Authorization that need a
-live flow to probe) report `n/a` under the supplied-token path, since no
-flow ran to test. Everything about the token itself and the server's tools
-(§3 Credential & Token Risk, §4 Tool Safety & Blast Radius) runs normally
-under all three paths.
+live flow to probe) report `n/a` under the static-token path, since no flow
+ran to test. Refresh-token rotation (CT-05, §3) is `n/a` for the same
+reason — a static token has no OAuth token response to check the lifetime
+or rotation of. Everything else about the token and the server's tools
+(audience binding, transmission, integrity, tools/list, transport) runs
+normally under all three paths, and reports which path was used as
+`auth_method` (`static-token` or `oauth`) in its evidence.
 
 ## What it checks
 
