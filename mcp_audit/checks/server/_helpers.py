@@ -557,13 +557,19 @@ def obtained_without_auth_note(ctx) -> str:
 
 def auth_method_label(ctx) -> str:
     """How the current session's token was obtained, for evidence:
-    'static-token' (--token, no OAuth flow ran), 'oauth' (a real
-    authorization-code flow completed), or 'none' (no session)."""
+    'static-token' (--token, no OAuth flow ran), 'preconfigured-client' (a
+    real authorization-code flow, but against a pre-registered client_id
+    the operator supplied instead of self-registering), 'dcr' (a real flow
+    with a self-registered client — CIMD or Dynamic Client Registration),
+    or 'none' (no session)."""
     if not ctx.auth_session:
         return "none"
-    if ctx.auth_session.probe_evidence.get("auth_mode") == "supplied-token":
+    auth_mode = ctx.auth_session.probe_evidence.get("auth_mode")
+    if auth_mode == "supplied-token":
         return "static-token"
-    return "oauth"
+    if auth_mode == "supplied-credentials":
+        return "preconfigured-client"
+    return "dcr"
 
 
 def decode_jwt_payload(token: str) -> dict | None:

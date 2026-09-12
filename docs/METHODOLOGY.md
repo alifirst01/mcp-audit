@@ -89,20 +89,23 @@ flow and handles a real user access token.
 
 ## How the OAuth flow works
 
-Three credential paths, via `AuthInput` (`mcp_audit/core/oauth.py`),
-resolved in priority order. Supplying a credential (`--token`, `--client-id`,
-`--client-metadata-url`) authenticates on its own; bare `--auth` is only
-needed to select Path 3, the zero-credential automatic path.
+Three credential paths, via `AuthInput` (`mcp_audit/core/oauth.py`). A
+supplied token and supplied client credentials are mutually exclusive —
+`cli._build_auth_input()` exits with an error if both are given, since they
+authenticate a run in fundamentally different ways. Supplying either
+authenticates on its own; bare `--auth` is only needed to select Path 3, the
+zero-credential automatic path.
 
 ### Path 1 — static token (`--token` / `MCP_AUDIT_TOKEN`)
 
-Highest priority. If a token is supplied, `_authenticate_with_supplied_token()`
-builds an `AuthSession` directly from it — no discovery requirement, no
-network calls, no browser, no `--auth` flag needed. The session's `resource`
-is set to the target URL for the checks that compare it against a claim,
-and `probe_evidence["auth_mode"] = "supplied-token"` marks it so later
-checks can tell (surfaced in evidence as `auth_method: "static-token"`,
-vs. `"oauth"` for the other two paths).
+If a token is supplied, `_authenticate_with_supplied_token()` builds an
+`AuthSession` directly from it — no discovery requirement, no network
+calls, no browser, no `--auth` flag needed. The session's `resource` is set
+to the target URL for the checks that compare it against a claim, and
+`probe_evidence["auth_mode"] = "supplied-token"` marks it so later checks
+can tell (surfaced in evidence as `auth_method: "static-token"`; Paths 2
+and 3 surface `"preconfigured-client"` and `"dcr"` respectively —
+`auth_method_label()` in `checks/server/_helpers.py`).
 
 The token is used as-is for the `initialize` handshake and every
 authenticated request after it (tools/list, transport probes, CT-01/03/04)
@@ -133,6 +136,17 @@ be registered once. If the port is already bound by something else,
 falls back to a random one, which would otherwise send the AS to a
 different redirect_uri than the one registered and fail well downstream
 with no obvious cause.
+
+A confidential client (`--client-secret` supplied) authenticates at the
+token endpoint via `_token_request()`: HTTP Basic first (RFC 6749 §2.3.1's
+preferred `client_secret_basic`), falling back once to the secret in the
+form body (`client_secret_post`) if Basic is rejected — some ASes (GitHub
+included) only accept one of the two, and metadata doesn't reliably say
+which. The same helper backs both the initial exchange and CT-05's refresh,
+so a confidential client's refresh authenticates the same way the exchange
+did instead of failing with "client_secret required." This path produces a
+real OAuth token via a real flow, so — unlike Path 1 — AA-02/03/04 and CT-05
+run normally rather than reporting `n/a`.
 
 ### Path 3 — auto (bare `--auth`, nothing else supplied)
 

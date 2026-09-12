@@ -65,10 +65,12 @@ _PKCE_VERIFIER_LENGTH = 48
 class AuthInput:
     """Credential material the operator supplied via the CLI for --auth.
 
-    Fields are checked in priority order by `mode()`: a supplied token wins
-    over supplied client credentials, which win over the fully-automatic
-    path. Supplying more than one is not an error — the higher-priority
-    input is used and the rest are ignored (the CLI warns about this).
+    `mode()` picks the path: a supplied token, supplied client credentials,
+    or (neither) the fully-automatic path. A token and client credentials
+    together are mutually exclusive — they authenticate a run in
+    fundamentally different ways (skip the flow entirely vs. run it with a
+    pre-registered client) — so the CLI (`_build_auth_input`) rejects that
+    combination outright rather than silently picking one.
     """
     token: Optional[str] = None
     client_id: Optional[str] = None
@@ -270,12 +272,44 @@ def build_authorize_url(
     return f"{endpoint}?{urlencode(params)}"
 
 
-def _client_auth(client: ClientCredentials) -> ClientAuth:
-    """RFC 6749 §2.3 client authentication for the token endpoint: HTTP
-    Basic when a client_secret is present (confidential client), otherwise
-    client_id in the body only (public client)."""
-    method = "client_secret_basic" if client.client_secret else "none"
+def _client_auth(client: ClientCredentials, method: str) -> ClientAuth:
+    """RFC 6749 §2.3 client authentication for the token endpoint, under one
+    specific method: `client_secret_basic` (HTTP Basic), `client_secret_post`
+    (secret in the form body), or `none` (client_id in the body only, for a
+    public client)."""
     return ClientAuth(client.client_id, client.client_secret, auth_method=method)
+
+
+def _token_request(ctx: ProbeContext, token_endpoint: str, client: ClientCredentials, body: str):
+    """POST a prepared token-request `body`, authenticating as `client`.
+
+    A public client (no secret) just sends client_id in the body. A
+    confidential client tries HTTP Basic first — RFC 6749 §2.3.1's preferred
+    method — then, if the AS rejects it, retries once with the secret in the
+    form body instead: some ASes only accept one or the other, and neither
+    the spec nor discovery metadata reliably says which in advance. `body`
+    is a plain query string (untouched by either attempt), so reusing it
+    across both attempts is safe.
+    """
+    if not client.client_secret:
+        uri, headers, form = _client_auth(client, "none").prepare(
+            "POST", token_endpoint, {"Accept": "application/json"}, body)
+        return ctx.post_form(uri, data=form, headers=headers)
+
+    uri, basic_headers, basic_body = _client_auth(client, "client_secret_basic").prepare(
+        "POST", token_endpoint, {"Accept": "application/json"}, body)
+    r = ctx.post_form(uri, data=basic_body, headers=basic_headers)
+    if not r.error and r.status == 200:
+        return r
+
+    uri, post_headers, post_body = _client_auth(client, "client_secret_post").prepare(
+        "POST", token_endpoint, {"Accept": "application/json"}, body)
+    r2 = ctx.post_form(uri, data=post_body, headers=post_headers)
+    if not r2.error and r2.status == 200:
+        return r2
+    # Neither worked — surface whichever response is more informative (a
+    # real HTTP response over a transport-level error).
+    return r if not r.error else r2
 
 
 # ---------------------------------------------------------------------------
@@ -301,9 +335,7 @@ def exchange_code(
         code_verifier=verifier,
         resource=resource,
     )
-    headers = {"Accept": "application/json"}
-    uri, headers, body = _client_auth(client).prepare("POST", token_endpoint, headers, body)
-    r = ctx.post_form(uri, data=body, headers=headers)
+    r = _token_request(ctx, token_endpoint, client, body)
     if r.error or r.status != 200:
         raise RuntimeError(
             f"Token exchange failed: POST {token_endpoint} -> "
@@ -330,6 +362,7 @@ def exchange_code(
         requested_scope=requested_scope,
         issuer=issuer_from_callback or as_metadata.get("issuer"),
         resource=resource,
+        client_secret=client.client_secret,
     )
 
 
@@ -343,9 +376,7 @@ def refresh(ctx: ProbeContext, as_metadata: dict, client: ClientCredentials,
         refresh_token=session.refresh_token,
         resource=session.resource,
     )
-    headers = {"Accept": "application/json"}
-    uri, headers, body = _client_auth(client).prepare("POST", token_endpoint, headers, body)
-    r = ctx.post_form(uri, data=body, headers=headers)
+    r = _token_request(ctx, token_endpoint, client, body)
     if r.error or r.status != 200:
         raise RuntimeError(
             f"Refresh failed: POST {token_endpoint} -> {r.status or r.error}: {r.text[:300]}"
@@ -367,6 +398,7 @@ def refresh(ctx: ProbeContext, as_metadata: dict, client: ClientCredentials,
         requested_scope=session.requested_scope,
         issuer=session.issuer,
         resource=session.resource,
+        client_secret=session.client_secret,
         probe_evidence={
             **session.probe_evidence,
             "refresh_rotated_token": rotated,

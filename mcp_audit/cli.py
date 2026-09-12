@@ -407,9 +407,10 @@ def _cmd_rubric(args):
 # ---------------------------------------------------------------------------
 
 def _build_auth_input(args) -> AuthInput:
-    """Resolve --auth credential material: supplied token > supplied client
-    credentials > fully-automatic. When both a flag and its env var are set,
-    the flag wins — it's the more specific signal for this invocation."""
+    """Resolve --auth credential material: supplied token, or supplied client
+    credentials, or fully-automatic — mutually exclusive, see AuthInput. When
+    both a flag and its env var are set, the flag wins — it's the more
+    specific signal for this invocation."""
     token = args.token or os.environ.get("MCP_AUDIT_TOKEN")
     client_id = args.client_id
     client_secret = args.client_secret or os.environ.get("MCP_AUDIT_CLIENT_SECRET")
@@ -425,9 +426,12 @@ def _build_auth_input(args) -> AuthInput:
               file=sys.stderr)
         sys.exit(2)
     if token and (client_id or client_metadata_url):
-        ignored = "--client-id/--client-secret" if client_id else "--client-metadata-url"
-        print(f"mcp-audit: --token (or MCP_AUDIT_TOKEN) takes priority over "
-              f"{ignored} for authentication; ignoring the latter.", file=sys.stderr)
+        conflicting = "--client-id/--client-secret" if client_id else "--client-metadata-url"
+        print(f"mcp-audit: --token (or MCP_AUDIT_TOKEN) and {conflicting} are mutually "
+              f"exclusive — they authenticate a run in different ways (skip the OAuth "
+              f"flow entirely vs. run it with a pre-registered client). Pass one, not both.",
+              file=sys.stderr)
+        sys.exit(2)
 
     return AuthInput(
         token=token,
@@ -572,38 +576,43 @@ def main(argv=None):
                          "'How the OAuth flow works'.")
     pe.add_argument(
         "--token",
-        help="Priority 1: use this access token/PAT/API key directly as "
-             "'Authorization: Bearer <value>' and skip the OAuth flow entirely "
-             "(no --auth needed) — only checks that need a token mcp-audit "
-             "itself issued (the interactive flow, refresh rotation) report "
-             "n/a; everything else, including initialize and tools/list, runs "
-             "normally. Prefer the MCP_AUDIT_TOKEN environment variable over "
-             "this flag: command-line arguments are visible to other processes "
-             "(e.g. `ps`) and land in shell history.",
+        help="Use this access token/PAT/API key directly as 'Authorization: "
+             "Bearer <value>' and skip the OAuth flow entirely (no --auth "
+             "needed) — only checks that need a token mcp-audit itself issued "
+             "(the interactive flow, refresh rotation) report n/a; everything "
+             "else, including initialize and tools/list, runs normally. "
+             "Mutually exclusive with --client-id/--client-metadata-url — "
+             "they authenticate a run in different ways. Prefer the "
+             "MCP_AUDIT_TOKEN environment variable over this flag: "
+             "command-line arguments are visible to other processes (e.g. "
+             "`ps`) and land in shell history.",
     )
     pe.add_argument(
         "--client-id",
-        help="Priority 2: run the full interactive login flow using this "
-             "pre-registered client ID instead of self-registering one. For "
-             "servers that require manual app registration (e.g. GitHub) and "
-             "don't support Dynamic Client Registration or Client ID Metadata "
-             "Documents. Pair with --client-secret if the app is confidential; "
-             "mutually exclusive with --client-metadata-url.",
+        help="Run the full interactive login flow using this pre-registered "
+             "client ID instead of self-registering one. For servers that "
+             "require manual app registration (e.g. GitHub) and don't "
+             "support Dynamic Client Registration or Client ID Metadata "
+             "Documents. Pair with --client-secret if the app is "
+             "confidential; mutually exclusive with --client-metadata-url "
+             "and with --token.",
     )
     pe.add_argument(
         "--client-secret",
-        help="Optional secret for a confidential --client-id app, sent via HTTP "
-             "Basic auth at the token endpoint. Prefer the "
-             "MCP_AUDIT_CLIENT_SECRET environment variable over this flag for "
-             "the same reason as --token.",
+        help="Optional secret for a confidential --client-id app. Tried via "
+             "HTTP Basic auth at the token endpoint first, falling back to "
+             "the secret in the form body if the AS rejects Basic (some "
+             "accept only one). Prefer the MCP_AUDIT_CLIENT_SECRET "
+             "environment variable over this flag for the same reason as "
+             "--token.",
     )
     pe.add_argument(
         "--client-metadata-url",
-        help="Priority 2 (alternative to --client-id): URL of a self-hosted "
-             "Client ID Metadata Document to authorize with directly, instead "
-             "of self-registering. Requires the Authorization Server to "
+        help="Alternative to --client-id: URL of a self-hosted Client ID "
+             "Metadata Document to authorize with directly, instead of "
+             "self-registering. Requires the Authorization Server to "
              "support Client ID Metadata Documents. Mutually exclusive with "
-             "--client-id.",
+             "--client-id and with --token.",
     )
     pe.add_argument(
         "--redirect-port",

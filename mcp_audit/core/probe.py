@@ -63,6 +63,11 @@ class AuthSession:
     issuer: Optional[str] = None
     resource: Optional[str] = None
     obtained_at: float = field(default_factory=time.time)
+    # A confidential client's secret, kept only so a later refresh() can
+    # re-authenticate at the token endpoint the same way the initial exchange
+    # did. Same handling as access_token/refresh_token: held in memory for
+    # the run, never copied into probe_evidence or any check's evidence.
+    client_secret: Optional[str] = None
     # Flow request/response details for checks that show their work.
     probe_evidence: dict = field(default_factory=dict)
 

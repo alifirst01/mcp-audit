@@ -452,7 +452,11 @@ def test_auth_method_label():
 
     ctx.auth_session = AuthSession(access_token="tok", token_type="Bearer",
                                    probe_evidence={"auth_mode": "auto"})
-    assert auth_method_label(ctx) == "oauth"
+    assert auth_method_label(ctx) == "dcr"
+
+    ctx.auth_session = AuthSession(access_token="tok", token_type="Bearer",
+                                   probe_evidence={"auth_mode": "supplied-credentials"})
+    assert auth_method_label(ctx) == "preconfigured-client"
     ctx.close()
 
 

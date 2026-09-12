@@ -362,6 +362,7 @@ class ShortLivedAndRefreshRotates(Check):
         try:
             client = oauth_module.ClientCredentials(
                 client_id=session.probe_evidence.get("client_id", ""),
+                client_secret=session.client_secret,
                 mechanism=session.probe_evidence.get("client_mechanism", ""),
             )
             refreshed = oauth_module.refresh(ctx, target.context.get("as_metadata", {}), client, session)

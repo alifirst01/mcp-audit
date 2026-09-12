@@ -48,17 +48,18 @@ mcp-audit rubric
 Authenticating unlocks §2–3 (Authentication & Authorization, Credential &
 Token Risk) and the Auth-tagged checks in §4 (Tool Safety & Blast Radius).
 Not every server can be driven the same way, so there are three credential
-paths. Add flags to tell it which one to use; **if you supply more than one,
-this priority order decides which wins** (mcp-audit prints a warning and
-ignores the rest). Supplying a credential (`--token`, `--client-id`, or
-`--client-metadata-url`) is itself enough to authenticate — `--auth` on its
-own is only needed to trigger Path 3, the zero-credential automatic path:
+paths. A static token and supplied client credentials are **mutually
+exclusive — pass one or the other, not both** (mcp-audit errors clearly if
+you do; they authenticate a run in fundamentally different ways). Supplying
+a credential (`--token`, `--client-id`, or `--client-metadata-url`) is
+itself enough to authenticate — `--auth` on its own is only needed to
+trigger Path 3, the zero-credential automatic path:
 
-| Priority | Path | Flags | Use when |
-|---|---|---|---|
-| 1 | **Static token** | `--token` (or `MCP_AUDIT_TOKEN`) | You already have an access token, PAT, or API key for this server. Skips the OAuth flow entirely — the tool goes straight to the `initialize` handshake with `Authorization: Bearer <token>`, no browser, no registration. Checks that specifically test the OAuth flow itself (PKCE, redirect-URI/issuer validation, refresh rotation) report `n/a` — there's no flow or token lifecycle to probe. |
-| 2 | **Supplied client credentials** | `--client-id` (+ optional `--client-secret` / `MCP_AUDIT_CLIENT_SECRET`), or `--client-metadata-url`; add `--redirect-port` if the provider needs an exact, pre-registered callback URL | The server requires pre-registration and doesn't support self-registration — e.g. **GitHub**, where you create an OAuth App by hand first. Runs the real interactive login flow, skipping only the registration step. |
-| 3 | **Auto** | `--auth`, nothing else | The server supports self-registration: Client ID Metadata Documents or Dynamic Client Registration. Works out of the box against **Supabase's default auth**, and against **WorkOS, Stytch, Keycloak, or Auth0** deployments with DCR enabled. |
+| Path | Flags | Use when |
+|---|---|---|
+| **Static token** | `--token` (or `MCP_AUDIT_TOKEN`) | You already have an access token, PAT, or API key for this server. Skips the OAuth flow entirely — the tool goes straight to the `initialize` handshake with `Authorization: Bearer <token>`, no browser, no registration. Checks that specifically test the OAuth flow itself (PKCE, redirect-URI/issuer validation, refresh rotation) report `n/a` — there's no flow or token lifecycle to probe. |
+| **Supplied client credentials** | `--client-id` (+ optional `--client-secret` / `MCP_AUDIT_CLIENT_SECRET`), or `--client-metadata-url`; add `--redirect-port` if the provider needs an exact, pre-registered callback URL | The server requires pre-registration and doesn't support self-registration — e.g. **GitHub**, where you create an OAuth App by hand first. Runs the real interactive login flow, skipping only the registration step. A confidential client (secret supplied) authenticates at the token endpoint via HTTP Basic, falling back to the form body if the AS rejects Basic. |
+| **Auto** | `--auth`, nothing else | The server supports self-registration: Client ID Metadata Documents or Dynamic Client Registration. Works out of the box against **Supabase's default auth**, and against **WorkOS, Stytch, Keycloak, or Auth0** deployments with DCR enabled. |
 
 ```bash
 # Path 1 — paste a token/API key you already have (fastest; no browser, no --auth needed)
@@ -113,16 +114,18 @@ report, before the per-check results, and marks every check that needed the
 session `ERROR` with the same reason rather than silently producing
 misleading `n/a`s.
 
-Whichever path completes, checks that specifically test the *interactive
-authorization flow* (PKCE enforcement, redirect-URI validation, issuer
-validation — the parts of §2 Authentication & Authorization that need a
-live flow to probe) report `n/a` under the static-token path, since no flow
-ran to test. Refresh-token rotation (CT-05, §3) is `n/a` for the same
-reason — a static token has no OAuth token response to check the lifetime
-or rotation of. Everything else about the token and the server's tools
-(audience binding, transmission, integrity, tools/list, transport) runs
-normally under all three paths, and reports which path was used as
-`auth_method` (`static-token` or `oauth`) in its evidence.
+Checks that specifically test the *interactive authorization flow* (PKCE
+enforcement, redirect-URI validation, issuer validation — the parts of §2
+Authentication & Authorization that need a live flow to probe) report `n/a`
+under the static-token path, since no flow ran to test. Refresh-token
+rotation (CT-05, §3) is `n/a` for the same reason — a static token has no
+OAuth token response to check the lifetime or rotation of. The supplied
+client-credentials path runs a real flow with a real token, so those checks
+run normally there, same as under auto. Everything else about the token and
+the server's tools (audience binding, transmission, integrity, tools/list,
+transport) runs normally under all three paths, and reports which path was
+used as `auth_method` in its evidence: `static-token`,
+`preconfigured-client`, or `dcr`.
 
 ## What it checks
 
