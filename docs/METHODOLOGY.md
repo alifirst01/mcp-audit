@@ -374,8 +374,46 @@ the real token as the closest available substitute.
 
 ### CT-04 — Invalid or expired tokens are rejected on every request (`oauth-token-checked-every-request`)
 
-Sends an invalid bearer token to the
-MCP endpoint. Expects HTTP 401. No known limitation.
+Sends a bearer token shaped exactly like the real one — same length, same
+punctuation/segment structure (a JWT's dots, a provider's `prefix_`
+convention) — but with every letter and digit substituted
+(`_fabricate_invalid_token`), so a rejection proves the server validates
+the token's content, not merely that it can parse the Authorization header.
+Distinct from CT-03's tampered token (the real token with only its last
+few characters changed, to isolate integrity/signature verification): here
+the whole value is different, and it was never issued at all. The two can
+still land on the same outcome on a server that does no real per-request
+validation — that's expected, not duplication.
+
+Classifies the response by *why* it was rejected, not just its status code
+(`_classify_rejection` in `credential_token_risk.py`), with **the body
+checked before the status code decides anything** — a hint match in the
+body wins even when the status is also generically "malformed request":
+
+- **PASS** — rejected specifically over the token/credential: HTTP 401
+  (which by definition, RFC 7235, means the request lacked valid
+  credentials), or any other status whose body names a token/credential
+  problem (`invalid_token`, `unauthorized`, `bearer`, `expired`,
+  `authorization header`, `badly formatted`, ...). This is checked first,
+  so e.g. GitHub's actual `HTTP 400: "bad request: Authorization header is
+  badly formatted"` classifies as PASS even though 400 is also a generic
+  envelope status — the token-naming phrase in the body takes precedence.
+- **n/a (inconclusive)** — only reached once the above didn't match:
+  rejected for an envelope/shape/routing/server reason that would have
+  rejected any request sent this way, valid token or not (a malformed
+  request, wrong method/`Accept` header, unknown route, an envelope-shaped
+  JSON-RPC error code like `-32600`/`-32700`/`-32020`, a `5xx`) — the token
+  was never actually evaluated, so this is recorded with the real status
+  and reason rather than scored either way. A JSON-RPC `error` object
+  delivered inside an HTTP 2xx body (the MCP idiom) is classified the same
+  way.
+- **FAIL** — not rejected at all: a 2xx response carrying no error, i.e.
+  the server actually served the protected resource despite the bad token.
+
+**Limitation:** the token/credential and envelope hint lists are a
+heuristic read of the response body; a server phrasing a rejection in
+neither vocabulary falls back to n/a (never FAIL) rather than being
+misclassified.
 
 ### CT-05 — Access tokens are short-lived and refresh tokens rotate (`oauth-short-lived-refresh`)
 

@@ -8,3 +8,4 @@ results/*.json
 .claude
 admin/
 .idea
+*.json

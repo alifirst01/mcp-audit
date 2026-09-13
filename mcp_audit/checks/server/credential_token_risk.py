@@ -19,7 +19,10 @@ from ...core.base import Check, register
 from ...core.models import Rating, SpecLevel
 from ...core.probe import ProbeContext
 from ...core import oauth as oauth_module
-from ._helpers import auth_method_label, decode_jwt_payload, request_evidence, scope_evidence
+from ._helpers import (
+    auth_method_label, decode_jwt_payload, parse_jsonrpc_message, request_evidence,
+    scope_evidence,
+)
 
 _SECTION = "Credential & Token Risk"
 
@@ -30,6 +33,95 @@ _SPEC_SEC = (
     "https://modelcontextprotocol.io/specification/draft/basic/authorization"
     "/security-considerations"
 )
+
+# Body text naming a token/credential problem. Checked ahead of status-code
+# bucketing so wording wins over a status like 400 that's also generically
+# "malformed request" (e.g. GitHub's 400 "Authorization header is badly
+# formatted").
+_TOKEN_REJECTION_HINTS = (
+    "token", "credential", "bearer", "unauthoriz", "unauthenticat",
+    "authenticat", "invalid_token", "invalid_grant", "expired",
+    "authorization header", "badly formatted", "malformed authorization",
+)
+
+# Body text naming an envelope/shape/routing/server problem: would reject
+# any request sent this way regardless of the token, so the token was never
+# evaluated. Only consulted after the token hints above have failed to match.
+_ENVELOPE_REJECTION_HINTS = (
+    "not found", "method not allowed", "not acceptable", "bad request",
+    "invalid request", "parse error", "invalid json", "unsupported media type",
+    "protocol version", "missing session", "no route", "unsupported",
+    "internal server error", "bad gateway", "service unavailable", "rate limit",
+)
+
+# JSON-RPC codes that are envelope-shaped, not auth-related: malformed
+# request, unknown method/params, or a request-shape rejection.
+_ENVELOPE_JSONRPC_CODES = {-32600, -32601, -32602, -32700, -32020}
+
+# 401 is deliberately absent: RFC 7235 defines it as meaning the request
+# lacked valid credentials, so it's always a token-rejection PASS regardless
+# of body content.
+_ENVELOPE_STATUS_CODES = {400, 404, 405, 406, 408, 409, 410, 415, 426, 429,
+                           500, 502, 503, 504}
+
+
+def _looks_like_token_rejection(status: int, haystack: str) -> bool:
+    return status == 401 or any(h in haystack for h in _TOKEN_REJECTION_HINTS)
+
+
+def _looks_like_envelope_rejection(status: int, haystack: str, err_code) -> bool:
+    if err_code in _ENVELOPE_JSONRPC_CODES:
+        return True
+    return status in _ENVELOPE_STATUS_CODES or any(h in haystack for h in _ENVELOPE_REJECTION_HINTS)
+
+
+def _classify_rejection(r) -> tuple[Rating, str]:
+    """Classify a rejected request by why it was rejected: PASS if the
+    body/status names a token problem, n/a if it's an envelope/routing/
+    server problem the token was never evaluated against, FAIL if the
+    request wasn't actually rejected (2xx, no error body). Body content is
+    checked before status code, since a status like 400 covers both cases."""
+    doc = parse_jsonrpc_message(r.text) if r.text else None
+    err_obj = doc.get("error") if isinstance(doc, dict) else None
+    err_text = ""
+    err_code = None
+    if isinstance(err_obj, dict):
+        err_text = f"{err_obj.get('message', '')} {err_obj.get('data', '')}"
+        err_code = err_obj.get("code")
+    elif isinstance(err_obj, str):
+        err_text = err_obj
+    haystack = f"{r.text or ''} {err_text}".lower()
+
+    if 200 <= r.status < 300 and err_obj is None:
+        return Rating.FAIL, f"HTTP {r.status} with no error in the response body"
+
+    reason_suffix = f": {err_text.strip()}" if err_text.strip() else ""
+
+    if _looks_like_token_rejection(r.status, haystack):
+        return Rating.PASS, f"HTTP {r.status}{reason_suffix}"
+
+    if _looks_like_envelope_rejection(r.status, haystack, err_code):
+        return Rating.NA, f"HTTP {r.status}{reason_suffix}"
+
+    return Rating.NA, f"HTTP {r.status} (reason not identifiable as token-related from the response)"
+
+
+def _fabricate_invalid_token(real_token: str) -> str:
+    """A never-issued bearer value with the same shape as `real_token`
+    (length, punctuation/segment structure) but different content, so a
+    server that validates tokens rejects it while one that only checks
+    header syntax still accepts the format. Distinct from CT-03's tampered
+    token, which mutates only the last few characters of the real one."""
+    def flip(ch: str) -> str:
+        if ch.isdigit():
+            return str((int(ch) + 5) % 10)
+        if ch.isalpha():
+            base = ord("a") if ch.islower() else ord("A")
+            return chr((ord(ch) - base + 13) % 26 + base)
+        return ch
+
+    fabricated = "".join(flip(c) for c in real_token)
+    return fabricated if fabricated and fabricated != real_token else (fabricated or "x") + "0"
 
 
 @register
@@ -250,9 +342,10 @@ class TokenIntegrityVerified(Check):
 
 @register
 class TokenCheckedEveryRequest(Check):
-    """CT-04: an obviously invalid bearer token is rejected. MCP Auth
-    §Overview — invalid or expired tokens MUST receive 401; no protected
-    resource is served without a verified token."""
+    """CT-04: a well-formed but never-issued bearer token is rejected
+    specifically because of the token, not just met with any non-2xx
+    status. MCP Auth §Overview — invalid or expired tokens MUST receive
+    401; no protected resource is served without a verified token."""
 
     id = "oauth-token-checked-every-request"
     rubric_id = "CT-04"
@@ -270,24 +363,41 @@ class TokenCheckedEveryRequest(Check):
     requires_auth = True
 
     def run(self, target, ctx: ProbeContext):
-        headers = {"Authorization": "Bearer not-a-real-token-000"}
+        session = ctx.auth_session
+        fabricated = _fabricate_invalid_token(session.access_token)
+        headers = {"Authorization": f"Bearer {fabricated}"}
         r = ctx.get(target.url, headers=headers)
         evidence = request_evidence("GET", target.url, headers, None, r)
         evidence["auth_method"] = auth_method_label(ctx)
         evidence.update(scope_evidence(ctx))
         if r.error:
             return self._result(Rating.ERROR, f"Request failed: {r.error}")
-        if r.status == 401:
+
+        rating, reason = _classify_rejection(r)
+        evidence["rejection_classification"] = rating.value
+        evidence["rejection_reason"] = reason
+
+        if rating == Rating.PASS:
             return self._result(
                 Rating.PASS,
                 f"A request to {target.url} with an obviously invalid bearer "
-                f"token was rejected with HTTP 401, as expected.",
+                f"token was rejected over the token/credential itself "
+                f"({reason}).",
+                evidence,
+            )
+        if rating == Rating.NA:
+            return self._result(
+                Rating.NA,
+                f"A request to {target.url} with an obviously invalid bearer "
+                f"token was rejected, but for an envelope/shape/routing/server "
+                f"reason ({reason}) rather than the token — inconclusive for "
+                f"whether the token itself is checked.",
                 evidence,
             )
         return self._result(
             Rating.FAIL,
             f"A request to {target.url} with an obviously invalid bearer token "
-            f"got HTTP {r.status} instead of 401 — this server may be "
+            f"was honored ({reason}) instead of rejected — this server may be "
             f"processing protected requests without actually verifying the "
             f"token.",
             evidence,
