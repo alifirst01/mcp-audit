@@ -6,8 +6,6 @@ from __future__ import annotations
 
 import argparse
 
-import pytest
-
 from mcp_audit import cli
 from mcp_audit.core.oauth import AuthInput
 
@@ -20,12 +18,6 @@ def _args(**overrides):
     )
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
-
-
-@pytest.fixture(autouse=True)
-def _no_real_network(monkeypatch):
-    monkeypatch.setenv("MCP_AUDIT_TOKEN", "")
-    monkeypatch.setenv("MCP_AUDIT_CLIENT_SECRET", "")
 
 
 def _capture_evaluate(monkeypatch, calls):

@@ -96,7 +96,7 @@ authenticate a run in fundamentally different ways. Supplying either
 authenticates on its own; bare `--auth` is only needed to select Path 3, the
 zero-credential automatic path.
 
-### Path 1 — static token (`--token` / `MCP_AUDIT_TOKEN`)
+### Path 1 — static token (`--token`)
 
 If a token is supplied, `_authenticate_with_supplied_token()` builds an
 `AuthSession` directly from it — no discovery requirement, no network

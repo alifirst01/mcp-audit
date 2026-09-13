@@ -18,12 +18,6 @@ AS_META = {"token_endpoint": "https://as.test/token", "issuer": "https://as.test
 CONFIDENTIAL_CLIENT = ClientCredentials(client_id="cid", client_secret="shh", mechanism="supplied")
 
 
-@pytest.fixture(autouse=True)
-def _no_real_env_credentials(monkeypatch):
-    monkeypatch.setenv("MCP_AUDIT_TOKEN", "")
-    monkeypatch.setenv("MCP_AUDIT_CLIENT_SECRET", "")
-
-
 def _exchange(ctx: ProbeContext, client=CONFIDENTIAL_CLIENT) -> AuthSession:
     return exchange_code(
         ctx, AS_META, client, code="c", verifier="v",
@@ -197,3 +191,22 @@ def test_cli_token_alone_is_still_fine():
     )
     auth_input = _build_auth_input(args)
     assert auth_input.mode() == "supplied-token"
+
+
+# --- credentials come only from CLI flags, never environment variables -----
+
+def test_env_vars_are_ignored_for_token_and_client_secret(monkeypatch):
+    """MCP_AUDIT_TOKEN / MCP_AUDIT_CLIENT_SECRET must have no effect: only an
+    explicit --token/--client-secret on this invocation counts."""
+    monkeypatch.setenv("MCP_AUDIT_TOKEN", "env-token-should-be-ignored")
+    monkeypatch.setenv("MCP_AUDIT_CLIENT_SECRET", "env-secret-should-be-ignored")
+
+    args = argparse.Namespace(
+        token=None, client_id="cid", client_secret=None,
+        client_metadata_url=None, redirect_port=None, scopes=None,
+    )
+    auth_input = _build_auth_input(args)
+
+    assert auth_input.token is None
+    assert auth_input.client_secret is None
+    assert auth_input.mode() == "supplied-credentials"   # public client, not blocked

@@ -57,14 +57,17 @@ trigger Path 3, the zero-credential automatic path:
 
 | Path | Flags | Use when |
 |---|---|---|
-| **Static token** | `--token` (or `MCP_AUDIT_TOKEN`) | You already have an access token, PAT, or API key for this server. Skips the OAuth flow entirely — the tool goes straight to the `initialize` handshake with `Authorization: Bearer <token>`, no browser, no registration. Checks that specifically test the OAuth flow itself (PKCE, redirect-URI/issuer validation, refresh rotation) report `n/a` — there's no flow or token lifecycle to probe. |
-| **Supplied client credentials** | `--client-id` (+ optional `--client-secret` / `MCP_AUDIT_CLIENT_SECRET`), or `--client-metadata-url`; add `--redirect-port` if the provider needs an exact, pre-registered callback URL | The server requires pre-registration and doesn't support self-registration — e.g. **GitHub**, where you create an OAuth App by hand first. Runs the real interactive login flow, skipping only the registration step. A confidential client (secret supplied) authenticates at the token endpoint via HTTP Basic, falling back to the form body if the AS rejects Basic. |
+| **Static token** | `--token` | You already have an access token, PAT, or API key for this server. Skips the OAuth flow entirely — the tool goes straight to the `initialize` handshake with `Authorization: Bearer <token>`, no browser, no registration. Checks that specifically test the OAuth flow itself (PKCE, redirect-URI/issuer validation, refresh rotation) report `n/a` — there's no flow or token lifecycle to probe. |
+| **Supplied client credentials** | `--client-id` (+ optional `--client-secret`), or `--client-metadata-url`; add `--redirect-port` if the provider needs an exact, pre-registered callback URL | The server requires pre-registration and doesn't support self-registration — e.g. **GitHub**, where you create an OAuth App by hand first. Runs the real interactive login flow, skipping only the registration step. A confidential client (secret supplied) authenticates at the token endpoint via HTTP Basic, falling back to the form body if the AS rejects Basic. |
 | **Auto** | `--auth`, nothing else | The server supports self-registration: Client ID Metadata Documents or Dynamic Client Registration. Works out of the box against **Supabase's default auth**, and against **WorkOS, Stytch, Keycloak, or Auth0** deployments with DCR enabled. |
+
+Credentials are read only from these CLI flags — never from an environment
+variable — so the exact command line you ran is the only source of what
+was used.
 
 ```bash
 # Path 1 — paste a token/API key you already have (fastest; no browser, no --auth needed)
-export MCP_AUDIT_TOKEN=napi_your_existing_api_key
-mcp-audit eval --url https://mcp.neon.tech/mcp
+mcp-audit eval --url https://mcp.neon.tech/mcp --token napi_your_existing_api_key
 
 # Path 2 — pre-registered app (GitHub requires this; DCR/CIMD aren't available)
 #   By default the loopback listener uses a random OS-assigned port each run,
@@ -77,8 +80,8 @@ mcp-audit eval --url https://mcp.neon.tech/mcp
 #      http://127.0.0.1:8765/callback (any free port; just be consistent).
 #   2. Run:
 mcp-audit eval --url https://api.githubcopilot.com/mcp \
-  --client-id YOUR_CLIENT_ID --redirect-port 8765
-# add --client-secret (or MCP_AUDIT_CLIENT_SECRET) if the app is confidential.
+  --client-id YOUR_CLIENT_ID --client-secret YOUR_CLIENT_SECRET --redirect-port 8765
+# --client-secret only if the app is confidential.
 # Omitting --redirect-port here would give a different port (and therefore a
 # redirect_uri mismatch) on every run.
 
@@ -108,15 +111,15 @@ unavailable — server may require a scope to enumerate tools; re-run with
 never retries with broader scopes on your behalf — widening is always your
 call, made with `--scopes`.
 
-**Security note:** prefer the `MCP_AUDIT_TOKEN` / `MCP_AUDIT_CLIENT_SECRET`
-environment variables over the `--token` / `--client-secret` flags where you
-can. Command-line arguments are visible to other processes on the same
-machine (e.g. via `ps`) and get recorded in shell history; environment
-variables set in the calling shell are not. mcp-audit never writes either
-value — nor the access token obtained via `--auth` — into the console
-output or the JSON report saved by `--out`: only the resulting evidence
-(status codes, header values, claims), never the raw token or secret. See
-"Where evidence lives" below for exactly which file that ends up in.
+**Security note:** `--token` and `--client-secret` are plain CLI arguments,
+which are visible to other processes on the same machine (e.g. via `ps`)
+and get recorded in shell history — mcp-audit does not read these from
+environment variables instead, so weigh that when choosing where to run it.
+Regardless of how a secret got in, mcp-audit never writes it — nor the
+access token obtained via `--auth` — into the console output or the JSON
+report saved by `--out`: only the resulting evidence (status codes, header
+values, claims), never the raw token or secret. See "Where evidence lives"
+below for exactly which file that ends up in.
 
 **Where evidence lives:** the console only ever prints each check's
 human-readable summary line — it never prints the underlying request/

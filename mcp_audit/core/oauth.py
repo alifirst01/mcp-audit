@@ -21,8 +21,8 @@ This is a minimal-privilege default.
 
 Secrets never reach evidence, the console, or JSON output — only the
 resulting `access_token` is held in memory (tests/test_oauth_no_secret_leak.py).
-Prefer `MCP_AUDIT_CLIENT_SECRET` / `MCP_AUDIT_TOKEN` over the CLI flags, which
-are visible via `ps` and shell history.
+Credential flags (`--token`, `--client-secret`) are read only from the CLI
+invocation, never from an environment variable.
 """
 from __future__ import annotations
 

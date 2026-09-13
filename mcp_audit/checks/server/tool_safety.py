@@ -41,7 +41,7 @@ _INJECTION_PARAM_PATTERNS = ("url", "uri", "href", "link", "endpoint")
 # Tool names suggesting they fetch untrusted external data.
 _INJECTION_TOOL_PATTERNS = (
     "web_search", "fetch_url", "read_url", "browse",
-    "http_get", "scrape", "crawl", "fetch", "open_url",
+    "http_get", "scrape", "crawl", "open_url",
 )
 
 

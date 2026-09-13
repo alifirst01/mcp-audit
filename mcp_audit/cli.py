@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import pathlib
 import re
 import sys
@@ -583,10 +582,7 @@ def main(argv=None):
              "(the interactive flow, refresh rotation) report n/a; everything "
              "else, including initialize and tools/list, runs normally. "
              "Mutually exclusive with --client-id/--client-metadata-url — "
-             "they authenticate a run in different ways. Prefer the "
-             "MCP_AUDIT_TOKEN environment variable over this flag: "
-             "command-line arguments are visible to other processes (e.g. "
-             "`ps`) and land in shell history.",
+             "they authenticate a run in different ways.",
     )
     pe.add_argument(
         "--client-id",
@@ -603,9 +599,7 @@ def main(argv=None):
         help="Optional secret for a confidential --client-id app. Tried via "
              "HTTP Basic auth at the token endpoint first, falling back to "
              "the secret in the form body if the AS rejects Basic (some "
-             "accept only one). Prefer the MCP_AUDIT_CLIENT_SECRET "
-             "environment variable over this flag for the same reason as "
-             "--token.",
+             "accept only one).",
     )
     pe.add_argument(
         "--client-metadata-url",
@@ -647,11 +641,9 @@ def main(argv=None):
     pf = sub.add_parser("eval-file", help="Bulk-evaluate servers from a YAML/JSON file.")
     pf.add_argument("path", help="Path to servers.yaml / servers.json.")
     pf.add_argument("--token", help="Credential to use if you confirm auth for a "
-                                     "target at its prompt. See `eval --help`. Also "
-                                     "MCP_AUDIT_TOKEN.")
+                                     "target at its prompt. See `eval --help`.")
     pf.add_argument("--client-id", help="See `eval --help`.")
-    pf.add_argument("--client-secret",
-                    help="See `eval --help`. Also MCP_AUDIT_CLIENT_SECRET.")
+    pf.add_argument("--client-secret", help="See `eval --help`.")
     pf.add_argument("--client-metadata-url", help="See `eval --help`.")
     pf.add_argument("--redirect-port", type=int, help="See `eval --help`.")
     pf.add_argument("--scopes", help="See `eval --help`.")
