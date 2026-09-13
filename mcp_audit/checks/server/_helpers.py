@@ -186,12 +186,16 @@ class McpSession:
     error: Optional[str] = None
     evidence: dict = field(default_factory=dict)
     auth_method: str = "none"
+    requested_scopes: list = field(default_factory=list)
+    granted_scopes: list = field(default_factory=list)
 
     def summary(self) -> dict:
         """The subset of session state a check puts in its evidence."""
         return {"message_url": self.message_url, "initialized": self.initialized,
                 "protocol_version": self.protocol_version, "error": self.error,
-                "auth_method": self.auth_method}
+                "auth_method": self.auth_method,
+                "requested_scopes": self.requested_scopes,
+                "granted_scopes": self.granted_scopes}
 
 
 def _is_sse_endpoint(url: str) -> bool:
@@ -319,6 +323,7 @@ def mcp_session(target, ctx) -> McpSession:
     evidence = request_evidence("POST", message_url, headers, body, r)
     evidence["authorization_sent"] = auth_sent
     evidence["auth_method"] = auth_method_label(ctx)
+    evidence.update(scope_evidence(ctx))
     evidence["protocol_negotiation"] = negotiation
     if resolve_note:
         evidence["endpoint_resolution"] = resolve_note
@@ -418,6 +423,7 @@ def mcp_session(target, ctx) -> McpSession:
             headers=note_headers,
         )
 
+    scopes = scope_evidence(ctx)
     session = McpSession(
         message_url=message_url,
         protocol_version=protocol_version,
@@ -428,6 +434,8 @@ def mcp_session(target, ctx) -> McpSession:
         error=err,
         evidence=evidence,
         auth_method=auth_method_label(ctx),
+        requested_scopes=scopes["requested_scopes"],
+        granted_scopes=scopes["granted_scopes"],
     )
     target.context["mcp_session"] = session
     return session
@@ -570,6 +578,18 @@ def auth_method_label(ctx) -> str:
     if auth_mode == "supplied-credentials":
         return "preconfigured-client"
     return "dcr"
+
+
+def scope_evidence(ctx) -> dict:
+    """`requested_scopes`/`granted_scopes` for a check's evidence, split from
+    the session's space-separated scope strings into lists. Both are `[]`
+    when there's no session, or when nothing was requested/granted — which
+    is the default: mcp-audit requests no scope unless --scopes supplied
+    one (see core/oauth.authenticate)."""
+    session = ctx.auth_session
+    requested = session.requested_scope.split() if session and session.requested_scope else []
+    granted = session.scope.split() if session and session.scope else []
+    return {"requested_scopes": requested, "granted_scopes": granted}
 
 
 def decode_jwt_payload(token: str) -> dict | None:

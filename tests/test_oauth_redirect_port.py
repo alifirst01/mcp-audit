@@ -110,7 +110,7 @@ def test_authenticate_reports_redirect_port_failure_without_falling_back(monkeyp
 def test_cli_threads_redirect_port_into_auth_input():
     args = argparse.Namespace(
         token=None, client_id="cid", client_secret=None, client_metadata_url=None,
-        redirect_port=8765,
+        redirect_port=8765, scopes=None,
     )
     auth_input = _build_auth_input(args)
     assert auth_input.redirect_port == 8765
@@ -119,6 +119,6 @@ def test_cli_threads_redirect_port_into_auth_input():
 def test_cli_redirect_port_defaults_to_none():
     args = argparse.Namespace(
         token=None, client_id=None, client_secret=None, client_metadata_url=None,
-        redirect_port=None,
+        redirect_port=None, scopes=None,
     )
     assert _build_auth_input(args).redirect_port is None

@@ -19,7 +19,7 @@ from ...core.base import Check, register
 from ...core.models import Rating, SpecLevel
 from ...core.probe import ProbeContext
 from ...core import oauth as oauth_module
-from ._helpers import auth_method_label, decode_jwt_payload, request_evidence
+from ._helpers import auth_method_label, decode_jwt_payload, request_evidence, scope_evidence
 
 _SECTION = "Credential & Token Risk"
 
@@ -66,12 +66,13 @@ class ResourceBoundToken(Check):
                 "can't be read client-side. This was requested with "
                 f"resource={session.resource!r} (RFC 8707) — confirm audience "
                 "binding server-side, e.g. via token introspection.",
-                {"resource_requested": session.resource, "auth_method": auth_method_label(ctx)},
+                {"resource_requested": session.resource, "auth_method": auth_method_label(ctx),
+                 **scope_evidence(ctx)},
             )
         aud = claims.get("aud")
         aud_list = aud if isinstance(aud, list) else [aud] if aud else []
         evidence = {"resource_requested": session.resource, "aud_claim": aud,
-                    "auth_method": auth_method_label(ctx)}
+                    "auth_method": auth_method_label(ctx), **scope_evidence(ctx)}
         matches = any(session.resource and (a == session.resource or session.resource.startswith(a)) for a in aud_list if a)
         if matches:
             return self._result(
@@ -221,6 +222,7 @@ class TokenIntegrityVerified(Check):
             "GET", target.url, {"Authorization": f"Bearer {tampered}"}, None, r
         )
         evidence["auth_method"] = auth_method_label(ctx)
+        evidence.update(scope_evidence(ctx))
 
         if r.status == 401:
             return self._result(
@@ -272,6 +274,7 @@ class TokenCheckedEveryRequest(Check):
         r = ctx.get(target.url, headers=headers)
         evidence = request_evidence("GET", target.url, headers, None, r)
         evidence["auth_method"] = auth_method_label(ctx)
+        evidence.update(scope_evidence(ctx))
         if r.error:
             return self._result(Rating.ERROR, f"Request failed: {r.error}")
         if r.status == 401:
@@ -330,7 +333,7 @@ class ShortLivedAndRefreshRotates(Check):
 
         notes = []
         evidence = {"expires_in": session.expires_in, "has_refresh_token": bool(session.refresh_token),
-                    "auth_method": auth_method_label(ctx)}
+                    "auth_method": auth_method_label(ctx), **scope_evidence(ctx)}
 
         if session.expires_in is None:
             notes.append("the token response carried no expires_in — lifetime unknown")

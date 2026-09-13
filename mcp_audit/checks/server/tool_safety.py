@@ -12,10 +12,15 @@ Spec source: modelcontextprotocol.io/specification/draft/server/tools
 """
 from __future__ import annotations
 
+from typing import Optional
+
 from ...core.base import Check, EVIDENCE_NOTE, register
 from ...core.models import Rating, SpecLevel
 from ...core.probe import ProbeContext
-from ._helpers import auth_method_label, fetch_tools_authed as fetch_tools, obtained_without_auth_note
+from ._helpers import (
+    auth_method_label, fetch_tools_authed as fetch_tools, obtained_without_auth_note,
+    scope_evidence,
+)
 
 _SECTION = "Tool Safety & Blast Radius"
 
@@ -40,10 +45,42 @@ _INJECTION_TOOL_PATTERNS = (
 )
 
 
+_SCOPE_LIMITED_REASON = (
+    "tool list unavailable — server may require a scope to enumerate tools; "
+    "re-run with --scopes."
+)
+
+
+def _scope_limited_reason(ctx: ProbeContext) -> Optional[str]:
+    """`_SCOPE_LIMITED_REASON` when an empty or refused tools/list could
+    plausibly be fixed by requesting a broader --scopes — i.e. a real OAuth
+    flow ran, so mcp-audit controls what scope was requested and could
+    request more. None for a static --token: its permissions come from
+    wherever it was issued, and --scopes has no effect on it, so blaming
+    scope there wouldn't be honest."""
+    session = ctx.auth_session
+    if not session or session.probe_evidence.get("auth_mode") == "supplied-token":
+        return None
+    return _SCOPE_LIMITED_REASON
+
+
+def _looks_scope_related(err: str) -> bool:
+    """Best-effort read of a tools/list failure as scope-shaped: an
+    authenticated request refused with 401/403, or a JSON-RPC error whose
+    text mentions a scope problem (e.g. insufficient_scope). Not certain —
+    other things can also produce a 401 — hence the hedged "may require" in
+    _SCOPE_LIMITED_REASON rather than a flat assertion."""
+    if err.startswith("unexpected-status:401") or err.startswith("unexpected-status:403"):
+        return True
+    return err.startswith("jsonrpc-error:") and "scope" in err.lower()
+
+
 def _fetch_error_result(check: Check, err: str, ctx: ProbeContext):
-    """Map a `fetch_tools` error string to a CheckResult. A refusal with an
-    active session is an error (the tool list should have been reachable);
-    everything else is n/a."""
+    """Map a `fetch_tools` error string to a CheckResult. A scope-shaped
+    refusal is n/a with a limitation reason, not a false PASS/empty result
+    and not silently retried with broader scopes — see _scope_limited_reason.
+    Any other refusal with an active session is an error (the tool list
+    should have been reachable); everything else is n/a."""
     if err == "stdio-no-http":
         return check._result(
             Rating.NA,
@@ -65,6 +102,10 @@ def _fetch_error_result(check: Check, err: str, ctx: ProbeContext):
             "does not consume. SSE async response not captured.",
             evidence,
         )
+    if _looks_scope_related(err):
+        reason = _scope_limited_reason(ctx)
+        if reason:
+            return check._result(Rating.NA, reason, evidence)
     if ctx.auth_session:
         return check._result(
             Rating.ERROR,
@@ -102,7 +143,10 @@ class ToolBlastRadius(Check):
         if err:
             return _fetch_error_result(self, err, ctx)
         if not tools:
-            return self._result(Rating.NA, "tools/list returned an empty tool list.")
+            return self._result(
+                Rating.NA,
+                _scope_limited_reason(ctx) or "tools/list returned an empty tool list.",
+            )
 
         auth_note = obtained_without_auth_note(ctx)
         flagged = []
@@ -118,6 +162,7 @@ class ToolBlastRadius(Check):
             "flagged_tools": flagged,
             "authenticated": bool(ctx.auth_session),
             "auth_method": auth_method_label(ctx),
+            **scope_evidence(ctx),
             "endpoint": target.url,
         }
 
@@ -170,7 +215,10 @@ class ToolRwSeparation(Check):
         if err:
             return _fetch_error_result(self, err, ctx)
         if not tools:
-            return self._result(Rating.NA, "tools/list returned an empty tool list.")
+            return self._result(
+                Rating.NA,
+                _scope_limited_reason(ctx) or "tools/list returned an empty tool list.",
+            )
 
         auth_note = obtained_without_auth_note(ctx)
         write_tools, read_tools, readonly_annotated = [], [], []
@@ -191,6 +239,7 @@ class ToolRwSeparation(Check):
             "readonly_annotated": readonly_annotated,
             "authenticated": bool(ctx.auth_session),
             "auth_method": auth_method_label(ctx),
+            **scope_evidence(ctx),
             "endpoint": target.url,
         }
 
@@ -265,7 +314,10 @@ class ToolInjectionSurface(Check):
         if err:
             return _fetch_error_result(self, err, ctx)
         if not tools:
-            return self._result(Rating.NA, "tools/list returned an empty tool list.")
+            return self._result(
+                Rating.NA,
+                _scope_limited_reason(ctx) or "tools/list returned an empty tool list.",
+            )
 
         auth_note = obtained_without_auth_note(ctx)
         flagged = []
@@ -295,6 +347,7 @@ class ToolInjectionSurface(Check):
             "injection_surface_tools": flagged,
             "authenticated": bool(ctx.auth_session),
             "auth_method": auth_method_label(ctx),
+            **scope_evidence(ctx),
             "endpoint": target.url,
         }
 

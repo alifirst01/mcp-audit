@@ -14,6 +14,11 @@ picks a path in priority order:
 On success it sets `ctx.auth_session`; on failure it sets `ctx.auth_failure`
 with a reason (never raises) that downstream checks and the CLI surface.
 
+For the two paths that run a real authorization request (2 and 3), the
+`scope` parameter is omitted by default — mcp-audit requests no scope at
+all unless `--scopes` supplies one, so the AS applies its own default grant.
+This is a minimal-privilege default.
+
 Secrets never reach evidence, the console, or JSON output — only the
 resulting `access_token` is held in memory (tests/test_oauth_no_secret_leak.py).
 Prefer `MCP_AUDIT_CLIENT_SECRET` / `MCP_AUDIT_TOKEN` over the CLI flags, which
@@ -79,6 +84,10 @@ class AuthInput:
     # Fixed port for the OAuth loopback listener (see LoopbackServer). None
     # (the default) keeps the OS-assigned ephemeral port, unchanged.
     redirect_port: Optional[int] = None
+    # Space-separated scope string for the authorization request (--scopes).
+    # None (the default) requests no scope at all — the AS applies its own
+    # default grant
+    scopes: Optional[str] = None
 
     def mode(self) -> str:
         if self.token:
@@ -443,7 +452,6 @@ def authenticate(target, ctx: ProbeContext, auth_input: Optional[AuthInput] = No
         return
 
     as_metadata = target.context.get("as_metadata")
-    prm_doc = target.context.get("prm_doc")
     if not as_metadata:
         ctx.auth_failure = AuthFailure(
             reason="No Authorization Server metadata discovered — the discovery "
@@ -468,8 +476,7 @@ def authenticate(target, ctx: ProbeContext, auth_input: Optional[AuthInput] = No
 
     print(
         f"\n  Redirect URI: {loopback.redirect_uri}"
-        + (f" (fixed via --redirect-port {auth_input.redirect_port})"
-           if auth_input.redirect_port else " (OS-assigned port; varies each run)")
+        + f" (fixed via --redirect-port {auth_input.redirect_port})"
     )
 
     try:
@@ -488,7 +495,11 @@ def authenticate(target, ctx: ProbeContext, auth_input: Optional[AuthInput] = No
         verifier, challenge = pkce_pair()
         state = secrets.token_urlsafe(16)
         resource = target.url.rstrip("/") if target.url else ""
-        requested_scope = " ".join((prm_doc or {}).get("scopes_supported", [])) or None
+        # Minimal by default: request no scope at all unless the operator
+        # opts in with --scopes. The AS then applies its own default grant.
+        # Applies uniformly to both the DCR and preconfigured-client paths —
+        # this is their one shared code path below.
+        requested_scope = auth_input.scopes or None
 
         authorize_url = build_authorize_url(
             as_metadata, client.client_id, loopback.redirect_uri, state, challenge,

@@ -164,7 +164,7 @@ def test_auth_method_label_preconfigured_client():
 def test_cli_errors_when_token_and_client_id_are_both_supplied():
     args = argparse.Namespace(
         token="a-token", client_id="cid", client_secret=None,
-        client_metadata_url=None, redirect_port=None,
+        client_metadata_url=None, redirect_port=None, scopes=None,
     )
     with pytest.raises(SystemExit) as e:
         _build_auth_input(args)
@@ -174,7 +174,7 @@ def test_cli_errors_when_token_and_client_id_are_both_supplied():
 def test_cli_errors_when_token_and_client_metadata_url_are_both_supplied():
     args = argparse.Namespace(
         token="a-token", client_id=None, client_secret=None,
-        client_metadata_url="https://client.example.test/meta.json", redirect_port=None,
+        client_metadata_url="https://client.example.test/meta.json", redirect_port=None, scopes=None,
     )
     with pytest.raises(SystemExit) as e:
         _build_auth_input(args)
@@ -184,7 +184,7 @@ def test_cli_errors_when_token_and_client_metadata_url_are_both_supplied():
 def test_cli_client_id_alone_is_still_fine():
     args = argparse.Namespace(
         token=None, client_id="cid", client_secret=None,
-        client_metadata_url=None, redirect_port=None,
+        client_metadata_url=None, redirect_port=None, scopes=None,
     )
     auth_input = _build_auth_input(args)
     assert auth_input.mode() == "supplied-credentials"
@@ -193,7 +193,7 @@ def test_cli_client_id_alone_is_still_fine():
 def test_cli_token_alone_is_still_fine():
     args = argparse.Namespace(
         token="a-token", client_id=None, client_secret=None,
-        client_metadata_url=None, redirect_port=None,
+        client_metadata_url=None, redirect_port=None, scopes=None,
     )
     auth_input = _build_auth_input(args)
     assert auth_input.mode() == "supplied-token"

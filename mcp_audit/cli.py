@@ -408,18 +408,18 @@ def _cmd_rubric(args):
 
 def _build_auth_input(args) -> AuthInput:
     """Resolve --auth credential material: supplied token, or supplied client
-    credentials, or fully-automatic — mutually exclusive, see AuthInput. When
-    both a flag and its env var are set, the flag wins — it's the more
-    specific signal for this invocation."""
-    token = args.token or os.environ.get("MCP_AUDIT_TOKEN")
+    credentials, or fully-automatic — mutually exclusive, see AuthInput.
+    Credentials are taken only from CLI flags, never environment variables:
+    an explicit flag on the invocation that ran is the only source."""
+    token = args.token
     client_id = args.client_id
-    client_secret = args.client_secret or os.environ.get("MCP_AUDIT_CLIENT_SECRET")
+    client_secret = args.client_secret
     client_metadata_url = args.client_metadata_url
     redirect_port = args.redirect_port
+    scopes = args.scopes
 
     if client_secret and not client_id:
-        print("mcp-audit: --client-secret (or MCP_AUDIT_CLIENT_SECRET) requires --client-id",
-              file=sys.stderr)
+        print("mcp-audit: --client-secret requires --client-id", file=sys.stderr)
         sys.exit(2)
     if client_id and client_metadata_url:
         print("mcp-audit: pass either --client-id or --client-metadata-url, not both",
@@ -427,7 +427,7 @@ def _build_auth_input(args) -> AuthInput:
         sys.exit(2)
     if token and (client_id or client_metadata_url):
         conflicting = "--client-id/--client-secret" if client_id else "--client-metadata-url"
-        print(f"mcp-audit: --token (or MCP_AUDIT_TOKEN) and {conflicting} are mutually "
+        print(f"mcp-audit: --token and {conflicting} are mutually "
               f"exclusive — they authenticate a run in different ways (skip the OAuth "
               f"flow entirely vs. run it with a pre-registered client). Pass one, not both.",
               file=sys.stderr)
@@ -439,6 +439,7 @@ def _build_auth_input(args) -> AuthInput:
         client_secret=client_secret,
         client_metadata_url=client_metadata_url,
         redirect_port=redirect_port,
+        scopes=scopes,
     )
 
 
@@ -626,6 +627,18 @@ def main(argv=None):
              "default OS-assigned ephemeral port. Fails clearly if the port is "
              "already in use, rather than silently picking another one.",
     )
+    pe.add_argument(
+        "--scopes",
+        help="Space-separated OAuth scopes to request during the authorize "
+             "step (Path 2/3 only — the DCR and preconfigured-client flows). "
+             "Omit to request no scope at all, the minimal-privilege default: "
+             "the Authorization Server then applies its own default grant, "
+             "rather than mcp-audit guessing at scope strings that could "
+             "fail with invalid_scope. Never auto-widened — this is the only "
+             "way to request more, e.g. --scopes \"read:user\". Requested and "
+             "granted scopes are recorded in evidence as requested_scopes/"
+             "granted_scopes.",
+    )
     pe.add_argument("--out", help="Write the JSON report to this path — the only place each "
                                    "check's full evidence (exact requests/responses) is saved; "
                                    "the console shows only the summary line.")
@@ -641,6 +654,7 @@ def main(argv=None):
                     help="See `eval --help`. Also MCP_AUDIT_CLIENT_SECRET.")
     pf.add_argument("--client-metadata-url", help="See `eval --help`.")
     pf.add_argument("--redirect-port", type=int, help="See `eval --help`.")
+    pf.add_argument("--scopes", help="See `eval --help`.")
     pf.add_argument("--out", help="Directory to write one JSON report per server plus "
                                    "summary.json (all servers, one file) — the only place each "
                                    "check's full evidence is saved; the console shows only the "

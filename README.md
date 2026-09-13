@@ -87,6 +87,27 @@ mcp-audit eval --url https://api.githubcopilot.com/mcp \
 mcp-audit eval --url https://your-supabase-project.mcp.example.com/mcp --auth
 ```
 
+**Scopes (Paths 2 and 3 only):** mcp-audit requests **no scope by default**
+— the authorization request omits `scope` entirely, so the AS applies its
+own default grant, rather than mcp-audit guessing at scope strings it has
+no way to know are valid (a wrong guess is an `invalid_scope` failure, not
+a safe no-op). It never assembles a broader request on its own, and never
+requests write/admin scopes automatically. Pass `--scopes "read:user write:issue"`
+to request exactly those scopes when a server needs one to expose
+functionality — this is the deliberate widening knob. Both what was
+requested and what the AS actually granted are recorded in every run's
+evidence as `requested_scopes`/`granted_scopes`.
+
+A minimal or default grant can mean some servers don't expose their tool
+list at all — `tools/list` comes back empty or `401`/`403`. The tool-surface
+checks (TS-01/02/03) tell that apart from a server that genuinely has no
+tools where the response makes it possible to (an authenticated refusal, or
+an error naming a missing scope) and report `n/a` with *"tool list
+unavailable — server may require a scope to enumerate tools; re-run with
+--scopes"* rather than a false `PASS` or a silently empty result. mcp-audit
+never retries with broader scopes on your behalf — widening is always your
+call, made with `--scopes`.
+
 **Security note:** prefer the `MCP_AUDIT_TOKEN` / `MCP_AUDIT_CLIENT_SECRET`
 environment variables over the `--token` / `--client-secret` flags where you
 can. Command-line arguments are visible to other processes on the same
