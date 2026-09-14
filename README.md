@@ -1,259 +1,161 @@
 # mcp-audit
 
-A **customer-focused security and usability evaluator for MCP servers.** Point it
-at a Model Context Protocol server and it answers the questions that actually
-matter to someone deciding whether to connect an agent to it: can the agent
-discover what this server does, can it actually use the responses it gets back,
-how does login work and is the resulting token protected, and can the agent get
-at credentials it shouldn't be able to.
+A security posture evaluator for remote [Model Context Protocol](https://modelcontextprotocol.io) servers. It connects to an MCP server the way a real client would, runs a set of spec-referenced checks against its authorization, transport, token, and tool-exposure behavior, and reports each result with the evidence behind it.
 
-It runs unauthenticated by default — observing the server the way a new client
-would (the 401 challenge, the public discovery documents) — and never sends
-destructive or exploit-shaped requests. Pass `--auth` and it runs a full
-OAuth 2.1 + PKCE browser login flow to unlock the checks that need a
-completed session, under a conservative policy that never calls a
-write/destructive tool. See [docs/METHODOLOGY.md](docs/METHODOLOGY.md).
+It is **read-only and non-destructive**. It sends the requests a conforming client sends, plus a small set of deliberately malformed variants used to test whether the server rejects them. It never fuzzes, floods, or attempts exploitation.
 
-This is not a protocol conformance tester (see the official
-[conformance suite](https://github.com/modelcontextprotocol/conformance) for that).
-It answers a different question: **not "does this server work," but "is it safe
-and usable to give an agent."**
+---
+
+## What it checks
+
+25 checks across five areas. Each check maps to a clause in the MCP authorization/transport spec or to an established security practice (least privilege, OWASP NHI). Full text and spec references: [`docs/RUBRIC.md`](docs/RUBRIC.md).
+
+| Area | Checks | Examples |
+|------|--------|----------|
+| Connection & Discovery | CD-01…CD-07 | 401 on unauthenticated request; Protected Resource Metadata (RFC 9728); Authorization Server metadata (RFC 8414); registration-mechanism classification |
+| Authentication & Authorization | AA-01…AA-05 | PKCE advertised and enforced; redirect-URI validation; issuer validation; scope minimization |
+| Credential & Token Risk | CT-01…CT-05 | bearer-in-header only; audience binding; tampered-token rejection; invalid-token rejection; short-lived tokens with refresh rotation |
+| Transport & Protocol | TR-01…TR-08 | HTTPS everywhere; `Origin` validation (DNS-rebinding); protocol-version enforcement; header/body consistency |
+| Tool Safety & Blast Radius | TS-01…TS-03 | unrestricted-access tools; read/write separation; external-content injection surface |
+
+Each check is evaluated one of three ways, shown in its output as a **method**:
+
+| Method | Meaning |
+|--------|---------|
+| `Probe` | Determined from an unauthenticated request or public metadata. No credentials needed. |
+| `Auth`  | Requires a completed authenticated session (see [Authentication](#authentication)). |
+| `Doc`   | Assessed from documentation; reported as a finding, not an automated pass/fail. |
+
+### Ratings: 
+- `pass`
+- `warn` (a SHOULD is unmet, or a MUST is met imprecisely)
+- `fail` (a MUST is violated)
+- `na` (not applicable)
+- `manual` (needs server-side confirmation) · `error` (could not evaluate).
+
+---
 
 ## Install
 
 ```bash
-pip install -e .            # from a clone
-# or, once published:
-# pip install mcp-audit
+git clone <repo-url> && cd mcp-audit
+pip install -e .
 ```
 
-## Quickstart
+Requires Python 3.10+.
+
+---
+
+## Usage
+
+Every example writes full evidence with `--out`. Without `--out`, the console shows only each check's summary line and no evidence is saved.
+
+### Evaluate one server
+
+Probe-only — no credentials. Runs every `Probe` check; `Auth` checks report `na`:
 
 ```bash
-# Evaluate one remote server, unauthenticated
-mcp-audit eval --url https://api.githubcopilot.com/mcp --name "GitHub"
+mcp-audit eval --url https://mcp.sentry.dev/mcp --out sentry.json
+```
 
-# Same, authenticated — see "Authenticating" below for which flags to add
-mcp-audit eval --url https://api.githubcopilot.com/mcp --name "GitHub" --auth
+### Evaluate a list of servers
 
-# Evaluate a whole list (bulk)
-mcp-audit eval-file servers/servers.yaml --out results/
+`--out` here is a **directory**: one JSON report per server plus a combined `summary.json`.
 
-# Print the rubric: every check and the customer-focus / spec reference it maps to
+```bash
+mcp-audit eval-file servers.yaml --out results/
+```
+
+### Print the rubric
+
+```bash
 mcp-audit rubric
 ```
 
-## Authenticating (`--auth`, or just a credential flag)
+---
 
-Authenticating unlocks §2–3 (Authentication & Authorization, Credential &
-Token Risk) and the Auth-tagged checks in §4 (Tool Safety & Blast Radius).
-Not every server can be driven the same way, so there are three credential
-paths. A static token and supplied client credentials are **mutually
-exclusive — pass one or the other, not both** (mcp-audit errors clearly if
-you do; they authenticate a run in fundamentally different ways). Supplying
-a credential (`--token`, `--client-id`, or `--client-metadata-url`) is
-itself enough to authenticate — `--auth` on its own is only needed to
-trigger Path 3, the zero-credential automatic path:
+## Authentication
 
-| Path | Flags | Use when |
-|---|---|---|
-| **Static token** | `--token` | You already have an access token, PAT, or API key for this server. Skips the OAuth flow entirely — the tool goes straight to the `initialize` handshake with `Authorization: Bearer <token>`, no browser, no registration. Checks that specifically test the OAuth flow itself (PKCE, redirect-URI/issuer validation, refresh rotation) report `n/a` — there's no flow or token lifecycle to probe. |
-| **Supplied client credentials** | `--client-id` (+ optional `--client-secret`), or `--client-metadata-url`; add `--redirect-port` if the provider needs an exact, pre-registered callback URL | The server requires pre-registration and doesn't support self-registration — e.g. **GitHub**, where you create an OAuth App by hand first. Runs the real interactive login flow, skipping only the registration step. A confidential client (secret supplied) authenticates at the token endpoint via HTTP Basic, falling back to the form body if the AS rejects Basic. |
-| **Auto** | `--auth`, nothing else | The server supports self-registration: Client ID Metadata Documents or Dynamic Client Registration. Works out of the box against **Supabase's default auth**, and against **WorkOS, Stytch, Keycloak, or Auth0** deployments with DCR enabled. |
+`Auth`-method checks (audience binding, PKCE enforcement, token/redirect validation, tool-surface) need a completed session. There are three ways to authenticate; pick the one that matches how the server registers clients. All work on both `eval` and `eval-file`.
 
-Credentials are read only from these CLI flags — never from an environment
-variable — so the exact command line you ran is the only source of what
-was used.
+| Mode | Flags | When to use |
+|------|-------|-------------|
+| **Self-registration (DCR)** | `--auth` | Server's authorization server supports Dynamic Client Registration. The tool registers itself and opens a browser to log in. This is the only mode that needs `--auth`. |
+| **Preconfigured app** | `--client-id <id>` (+ `--client-secret`, `--redirect-port`) | Server needs a manually registered OAuth app and doesn't support DCR (e.g. GitHub). |
+| **Static token** | `--token <value>` | You already hold an API key / PAT. Sent as `Authorization: Bearer <value>`, skipping OAuth. |
+
+`--token` and `--client-id` are mutually exclusive — each authenticates a run a different way, and neither needs `--auth`.
+
+**DCR (self-registration):**
+```bash
+mcp-audit eval --url https://mcp.sentry.dev/mcp --auth --out sentry.json
+```
+
+**Static token** — checks that need a tool-issued token (interactive flow, refresh rotation) report `na`; everything else, including `tools/list`, runs normally:
+```bash
+mcp-audit eval --url https://mcp.neon.tech/mcp --token "$NEON_API_KEY" --out neon.json
+```
+
+**Preconfigured client** — register the app's callback as `http://127.0.0.1:8765/callback` and pass the same port:
+```bash
+mcp-audit eval --url https://api.githubcopilot.com/mcp \
+  --client-id "$GH_ID" --client-secret "$GH_SECRET" --redirect-port 8765 --out github.json
+```
+
+### CLI arguments
+
+| Argument | Applies to | Purpose |
+|----------|-----------|---------|
+| `--url` | `eval` | Remote MCP endpoint URL. |
+| `--name` | `eval` | Display name for the report. |
+| `--auth` | both | Authenticate via self-registration (DCR). Not needed when a credential flag is supplied. |
+| `--token` | both | Use this token/PAT/API key directly as a bearer credential; skips OAuth. |
+| `--client-id` | both | Run the login flow with a pre-registered client ID instead of self-registering. |
+| `--client-secret` | both | Secret for a confidential `--client-id` app (HTTP Basic, falling back to form body). |
+| `--redirect-port` | both | Bind the OAuth loopback to a fixed port so the redirect URI is stable (needed with `--client-id` on providers requiring exact-match callbacks). |
+| `--scopes` | both | Space-separated scopes to request (DCR and preconfigured flows only). Omitted by default — the server applies its own minimal default grant; never auto-widened. |
+| `--out` | both | `eval`: file path for the JSON report. `eval-file`: directory for per-server reports + `summary.json`. The only place full evidence is written. |
+
+---
+
+### Scopes
+
+By default the tool requests **no scopes**, letting each server apply its own minimal default grant rather than guessing at scope strings that could fail with `invalid_scope`. Scopes are never auto-widened. When a server needs a specific scope to expose functionality (e.g. an empty tool list under the default grant), request it explicitly — requested and granted scopes are recorded in the evidence:
 
 ```bash
-# Path 1 — paste a token/API key you already have (fastest; no browser, no --auth needed)
-mcp-audit eval --url https://mcp.neon.tech/mcp --token napi_your_existing_api_key
-
-# Path 2 — pre-registered app (GitHub requires this; DCR/CIMD aren't available)
-#   By default the loopback listener uses a random OS-assigned port each run,
-#   so the redirect URI's port changes every time — fine for providers that
-#   treat any 127.0.0.1 port as a match, but GitHub OAuth Apps require the
-#   callback URL to match exactly, port included. Use --redirect-port to pin
-#   it to a port you register once.
-#   1. Create an OAuth App in GitHub settings, note its client ID (and secret,
-#      if confidential), and set its callback URL to
-#      http://127.0.0.1:8765/callback (any free port; just be consistent).
-#   2. Run:
-mcp-audit eval --url https://api.githubcopilot.com/mcp \
-  --client-id YOUR_CLIENT_ID --client-secret YOUR_CLIENT_SECRET --redirect-port 8765
-# --client-secret only if the app is confidential.
-# Omitting --redirect-port here would give a different port (and therefore a
-# redirect_uri mismatch) on every run.
-
-# Path 3 — auto self-registration (Supabase default / WorkOS / Stytch /
-# Keycloak / Auth0 with DCR enabled) — needs --auth since no credential is given
-mcp-audit eval --url https://your-supabase-project.mcp.example.com/mcp --auth
+mcp-audit eval --url https://mcp.example.com/mcp --auth --scopes "read:user read:org" --out example.json
 ```
 
-**Scopes (Paths 2 and 3 only):** mcp-audit requests **no scope by default**
-— the authorization request omits `scope` entirely, so the AS applies its
-own default grant, rather than mcp-audit guessing at scope strings it has
-no way to know are valid (a wrong guess is an `invalid_scope` failure, not
-a safe no-op). It never assembles a broader request on its own, and never
-requests write/admin scopes automatically. Pass `--scopes "read:user write:issue"`
-to request exactly those scopes when a server needs one to expose
-functionality — this is the deliberate widening knob. Both what was
-requested and what the AS actually granted are recorded in every run's
-evidence as `requested_scopes`/`granted_scopes`.
+---
 
-A minimal or default grant can mean some servers don't expose their tool
-list at all — `tools/list` comes back empty or `401`/`403`. The tool-surface
-checks (TS-01/02/03) tell that apart from a server that genuinely has no
-tools where the response makes it possible to (an authenticated refusal, or
-an error naming a missing scope) and report `n/a` with *"tool list
-unavailable — server may require a scope to enumerate tools; re-run with
---scopes"* rather than a false `PASS` or a silently empty result. mcp-audit
-never retries with broader scopes on your behalf — widening is always your
-call, made with `--scopes`.
+## Input: server list
 
-**Security note:** `--token` and `--client-secret` are plain CLI arguments,
-which are visible to other processes on the same machine (e.g. via `ps`)
-and get recorded in shell history — mcp-audit does not read these from
-environment variables instead, so weigh that when choosing where to run it.
-Regardless of how a secret got in, mcp-audit never writes it — nor the
-access token obtained via `--auth` — into the console output or the JSON
-report saved by `--out`: only the resulting evidence (status codes, header
-values, claims), never the raw token or secret. See "Where evidence lives"
-below for exactly which file that ends up in.
+`eval-file` reads a YAML or JSON list of servers:
 
-**Where evidence lives:** the console only ever prints each check's
-human-readable summary line — it never prints the underlying request/
-response evidence. That evidence exists only in memory unless you pass
-`--out`, in which case it's written to disk: `eval --out report.json`
-writes one file at that path; `eval-file --out results/` writes one file
-per server into the `results/` directory *plus* `results/summary.json`,
-which holds every server's full report (evidence included) in one file.
-Without `--out`, evidence is generated during the run but never saved
-anywhere.
-
-**If authentication doesn't complete** — the server needs a path you didn't
-supply, a supplied client ID is invalid, the browser never redirected back,
-etc. — mcp-audit prints the specific reason in a banner at the top of the
-report, before the per-check results, and marks every check that needed the
-session `ERROR` with the same reason rather than silently producing
-misleading `n/a`s.
-
-Checks that specifically test the *interactive authorization flow* (PKCE
-enforcement, redirect-URI validation, issuer validation — the parts of §2
-Authentication & Authorization that need a live flow to probe) report `n/a`
-under the static-token path, since no flow ran to test. Refresh-token
-rotation (CT-05, §3) is `n/a` for the same reason — a static token has no
-OAuth token response to check the lifetime or rotation of. The supplied
-client-credentials path runs a real flow with a real token, so those checks
-run normally there, same as under auto. Everything else about the token and
-the server's tools (audience binding, transmission, integrity, tools/list,
-transport) runs normally under all three paths, and reports which path was
-used as `auth_method` in its evidence: `static-token`,
-`preconfigured-client`, or `dcr`.
-
-## What it checks
-
-Sections are grouped by the question a developer needs answered at each
-stage of an MCP client (agent) calling an MCP server — not by MCP spec
-section number. All seven sections always appear in the rubric; only a
-defined subset of checks is live in v1 (25 of 44 — scoped to remote HTTP
-servers, using the Probe and Auth methods only), the rest are `planned`. Run
-`mcp-audit rubric` for the full, always-current list, or read
-[docs/RUBRIC.md](docs/RUBRIC.md) for the detailed breakdown, including the
-live/planned status and method for every check.
-
-| # | Section | Question |
-|---|---|---|
-| 1 | Connection & Discovery | Will the client connect, and how? |
-| 2 | Authentication & Authorization | How does the client prove identity, and what does the token permit? |
-| 3 | Credential & Token Risk | What credential does the client end up holding, and how exposed is it? |
-| 4 | Tool Safety & Blast Radius | How much can this server's tools do? |
-| 5 | Response Quality & Consistency | Can the client reliably parse and act on responses? |
-| 6 | API / Surface Fidelity | Does the MCP tool surface match the server's underlying product API? |
-| 7 | Transport & Protocol Plumbing | Is the underlying transport sound? |
-
-Sections 5 and 6 are entirely `planned` in v1 — no checks are registered
-for them in the committed tree yet.
-
-Ratings: **PASS** (meets it) · **WARN** (partial / SHOULD unmet / deviation) ·
-**FAIL** (violates a MUST) · **n/a** (doesn't apply, e.g. an OAuth check on a stdio
-server) · **MANUAL** (needs a documentation/source review) · **ERROR** (couldn't
-evaluate, e.g. the `--auth` flow didn't complete).
-
-## Transports
-
-The MCP auth spec applies to **HTTP** transports. **stdio** servers explicitly retrieve
-credentials from the environment instead, so HTTP-only checks are marked `n/a` for them
-and their evaluation focuses on documented credential handling. Set `transport:` per
-server in your list.
-
-## Add a check (the whole extensibility story)
-
-**A live (v1) check** gets its own `@register`-decorated class in one of the
-files under `mcp_audit/checks/server/` (grouped by section — e.g.
-`connection_discovery.py`, `tool_safety.py`):
-
-```python
-from mcp_audit.core.base import Check, register
-from mcp_audit.core.models import Rating, SpecLevel
-
-@register
-class MyCheck(Check):
-    id = "my-check"
-    rubric_id = "CD-09"                    # next free ID in its section — see docs/RUBRIC.md
-    section = "Connection & Discovery"     # must match an entry in cli.py's _SECTIONS
-    display_order = 109
-    title = "Human-readable title, in plain language — no bare acronyms"
-    spec_level = SpecLevel.SHOULD
-    spec_ref = "MCP Auth §X.Y: the exact clause, or a Customer Focus criterion"
-    method = "Probe"               # Probe / Auth / Doc — see docs/METHODOLOGY.md
-    requires_http = True           # skip on stdio targets
-    requires_auth = False          # True if it needs a completed --auth session
-    order = 50                     # lower runs first; discovery checks use low numbers,
-                                    # anything needing ctx.auth_session must be >= 400
-                                    # (see core/engine.py's lazy auth trigger)
-
-    def run(self, target, ctx):
-        r = ctx.get(target.url)   # cached, shared HTTP
-        if ...:
-            return self._result(Rating.PASS, "why it passed — name the actual value seen")
-        return self._result(Rating.WARN, "what was off", {"evidence": r.status})
+```yaml
+- name: Sentry MCP
+  url: https://mcp.sentry.dev/mcp
+- name: Asana MCP
+  url: https://mcp.asana.com/sse
+- name: Neon MCP
+  url: https://mcp.neon.tech/mcp
+  token: <value>
+- name: Github MCP
+  url: https://api.githubcopilot.com/mcp
+  redirect_port: 8765
+  client-id: <value>
+  client-secret: <value>
 ```
 
-The engine auto-discovers it — `core/engine.py`'s `_autoload_checks()` walks
-every module under `mcp_audit.checks`, so dropping the file in is enough.
-Nothing else changes. See `docs/METHODOLOGY.md` for the writing-style rule
-every check's `detail` text follows.
+## Methodology & limitations
 
-**A `planned` check** (a rubric entry not yet in v1's live scope) goes in
-the mirrored path under `admin/` instead — e.g.
-`admin/checks/server/response_quality.py` — which is git-ignored and never
-imported by `_autoload_checks()`, since it only walks `mcp_audit.checks`.
-To promote a planned check to live: update its status in `docs/RUBRIC.md`
-(the source of truth), then move its file (and any check-only helper it
-needs from `admin/checks/server/_helpers_planned.py`) into the matching
-path under `mcp_audit/checks/server/` — the relative imports in the admin
-files already point at the right place once moved.
+- **Observed behavior** A `pass` means the server's observable behavior or metadata meets the clause — not that the implementation is bug-free. Properties that can't be confirmed from outside (e.g. audience binding on an opaque token) are reported `manual`.
+- **Differential testing.** Checks that mutate a request to test rejection (TR-01/04/05/08, AA-02/03) first establish a valid baseline, mutate exactly one property, and rate by comparing the two. A mutation that reaches the *same* status as the baseline is a `fail` (the server never distinguished them); a mutation that is rejected but not in the exact way the spec requires is a `warn`; `pass` needs the required rejection shape. If the baseline itself never reaches the validation stage, the check reports `not-tested` rather than guessing.
+- **Heuristics are flagged.** Scope, tool-blast-radius, and injection-surface checks use keyword heuristics and say so — review flagged items individually; a `pass` means none were found by name/schema, not that none exist.
+- **Minimal scopes.** Runs request no scopes by default; the server applies its own default grant. Scope-related `na` is a deliberate least-privilege choice, not a defect.
+- **Token safety.** In auth mode the access token is held in memory only, never written to disk, never logged, and never placed in evidence or `--out` reports.
 
-## Roadmap
-
-Priority and ordering of `planned` work is intentionally left unstated in
-`docs/RUBRIC.md` — see its "Status" tag definition — so this list is
-illustrative, not a commitment or a sequence:
-
-- **Automated API-parity diff (SF-01):** `Target.openapi_ref` / `--openapi-ref` is
-  already wired as an extension point; today it's a pointer for the manual
-  review in `admin/checks/server/api_surface_fidelity.py`, not an automated
-  diff against `tools/list`.
-- **Cross-audience token rejection (CT-03) against a genuine second resource
-  server:** today's check is a best-effort substitute (a tampered copy of the
-  real token, which proves integrity verification but not audience-specific
-  rejection) since a single-target run has no second resource server to mint
-  a cross-audience token against.
-- **Local/stdio evaluation:** the `Server: Local` and `Server: Remote & Local`
-  checks across §3–5 (see `admin/checks/server/`) are structured but not yet
-  wired up to actually run against stdio targets.
-- **Client evaluation**: a parallel `checks/client/` suite reusing the same engine.
+Every result records the exact requests and responses behind it (bearer tokens redacted) as part of the evidence saved in `--out` dir, so findings are independently reproducible. Full method, per-check evidence, and spec references: [`docs/METHODOLOGY.md`](docs/METHODOLOGY.md).
 
 ## License
 
