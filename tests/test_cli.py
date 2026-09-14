@@ -26,6 +26,8 @@ def _capture_evaluate(monkeypatch, calls):
         class _Report:
             def to_dict(self_):
                 return {}
+            def to_summary_dict(self_):
+                return {}
         return _Report()
     monkeypatch.setattr(cli, "evaluate", fake_evaluate)
     monkeypatch.setattr(cli, "_print_report", lambda report: None)

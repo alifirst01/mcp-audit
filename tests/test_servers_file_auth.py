@@ -49,6 +49,23 @@ def test_loader_reads_per_server_auth_fields(tmp_path):
     assert "auth_overrides" not in by_name["Plain"].context
 
 
+def test_loader_accepts_hyphenated_field_names(tmp_path):
+    """A servers file is hand-edited; --client-id's CLI spelling is a
+    natural (and easy) mistake to make in YAML too."""
+    servers_yaml = tmp_path / "servers.yaml"
+    servers_yaml.write_text(
+        "- name: GitHub\n"
+        "  url: https://api.githubcopilot.com/mcp\n"
+        "  client-id: cid-123\n"
+        "  client-secret: shh\n"
+        "  redirect-port: 8765\n"
+    )
+    targets = load_targets(str(servers_yaml))
+    assert targets[0].context["auth_overrides"] == {
+        "client_id": "cid-123", "client_secret": "shh", "redirect_port": 8765,
+    }
+
+
 # --- _target_auth_input: field-level override, not whole-group swap -------
 
 def test_target_with_no_overrides_falls_back_to_cli_flags():
@@ -125,6 +142,8 @@ def test_eval_file_uses_each_targets_own_auth_input(monkeypatch, tmp_path):
         calls.append((target.name, include_auth, auth_input))
         class _Report:
             def to_dict(self_):
+                return {}
+            def to_summary_dict(self_):
                 return {}
         return _Report()
 

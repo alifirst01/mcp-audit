@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
+
+from .. import __version__
 
 
 class Rating(str, Enum):
@@ -88,8 +91,15 @@ class TargetReport:
     results: list[CheckResult] = field(default_factory=list)
     # Set when --auth was requested but the credential flow did not complete
     auth_failure: Optional[str] = None
+    # When this run happened, so a report file is dateable without relying
+    # on filesystem metadata (which doesn't survive being copied/emailed).
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def to_dict(self) -> dict[str, Any]:
+        """Full report, evidence included — written for `eval --out` and for
+        each server's own file under `eval-file --out`. Self-contained: name,
+        URL, tool version, and run timestamp travel with it, so the file is
+        verifiable without the run that produced it."""
         return {
             "name": self.target.name,
             "url": self.target.url,
@@ -97,5 +107,28 @@ class TargetReport:
             "transport": self.target.transport.value,
             "category": self.target.category,
             "auth_failure": self.auth_failure,
+            "tool_version": __version__,
+            "timestamp": self.timestamp,
             "results": [r.to_dict() for r in self.results],
+        }
+
+    def to_summary_dict(self) -> dict[str, Any]:
+        """Thin roll-up for `eval-file`'s summary.json: identifying fields
+        plus, per check, only rubric_id/rating/title/method/detail — no
+        evidence. Full evidence lives in this server's own per-server file."""
+        return {
+            "name": self.target.name,
+            "url": self.target.url,
+            "transport": self.target.transport.value,
+            "auth_failure": self.auth_failure,
+            "results": [
+                {
+                    "rubric_id": r.rubric_id or r.check_id,
+                    "rating": r.rating.value,
+                    "title": r.title,
+                    "method": r.method,
+                    "detail": r.detail,
+                }
+                for r in self.results
+            ],
         }

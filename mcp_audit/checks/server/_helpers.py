@@ -491,6 +491,34 @@ def differential_guard(check, evidence: dict, baseline, *mutated):
     return check.baseline_gate(baseline, evidence)
 
 
+def differential_status_evidence(baseline, mutated) -> dict:
+    """Flat baseline_status/mutation_status/mutation_error_code fields for a
+    differential check's evidence, so its narrated detail text is backed by
+    machine-readable values rather than only the nested request/response
+    blocks."""
+    err = extract_jsonrpc_error(mutated.text) if mutated.text else None
+    return {
+        "baseline_status": baseline.status,
+        "mutation_status": mutated.status,
+        "mutation_response_body": (mutated.text or "")[:500],
+        "mutation_error_code": (err or {}).get("code"),
+    }
+
+
+def differential_bucket(matched_expected: bool, baseline, mutated):
+    """The shared PASS/WARN/FAIL rule for a differential check whose
+    mutation is supposed to be rejected in a specific way: FAIL only if the
+    mutation reached the exact same status as the baseline (not rejected at
+    all); WARN if it was rejected but not in the expected shape (wrong
+    status/error code); PASS if `matched_expected`."""
+    from ...core.models import Rating
+    if matched_expected:
+        return Rating.PASS
+    if mutated.status == baseline.status:
+        return Rating.FAIL
+    return Rating.WARN
+
+
 def _tools_from_response(r):
     """(tools, err) from a tools/list HTTP 200. A JSON-RPC error in the body
     is surfaced rather than passed off as an empty tool list."""

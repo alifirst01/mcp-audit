@@ -170,6 +170,12 @@ def _print_report_rich(report) -> None:
         f"{counts[Rating.MANUAL]} manual[/dim]"
         f"[dim]  ({len(results)} checks)[/dim]"
     )
+    # A pass count on its own reads as "this server passed the audit" even
+    # when auth never completed and most of the run is Probe-only discovery
+    # checks — flag that in the same line the counts appear on, not only in
+    # the banner below (easy to miss when skimming many servers).
+    if report.auth_failure:
+        stats += "  [bold yellow](auth incomplete — discovery-layer only)[/bold yellow]"
     _console.print()
     _console.print(
         Panel(
@@ -271,6 +277,7 @@ def _print_report_plain(report) -> None:
         f"fail={counts[Rating.FAIL]}  error={counts[Rating.ERROR]}  "
         f"n/a={counts[Rating.NA]}  manual={counts[Rating.MANUAL]}  "
         f"({len(results)} checks)"
+        + ("  (auth incomplete — discovery-layer only)" if report.auth_failure else "")
     )
 
     if report.auth_failure:
@@ -559,14 +566,18 @@ def _cmd_eval_file(args):
                                on_result=on_result)
         _print_server_separator(target, index=i, total=total)
         _print_report(report)
-        summary.append(report.to_dict())
         if outdir:
-            _write_json(report, str(outdir / f"{_slug(target.name)}.json"))
+            filename = f"{_slug(target.name)}.json"
+            _write_json(report, str(outdir / filename))
+            summary.append({"report_file": filename, **report.to_summary_dict()})
+        else:
+            summary.append(report.to_summary_dict())
     if outdir:
         (outdir / "summary.json").write_text(json.dumps(summary, indent=2))
         print(
-            f"\nWrote {len(summary)} per-server report(s) and summary.json "
-            f"(all servers, evidence included) to {outdir}/"
+            f"\nWrote {len(summary)} per-server report(s) (evidence included) "
+            f"and a thin summary.json (rating/detail only — see report_file "
+            f"for each server's full evidence) to {outdir}/"
         )
 
 

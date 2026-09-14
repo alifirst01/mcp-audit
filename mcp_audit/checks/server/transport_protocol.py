@@ -20,7 +20,9 @@ from ...core.probe import ProbeContext
 from ._helpers import (
     accepted_async,
     base_url,
+    differential_bucket,
     differential_guard,
+    differential_status_evidence,
     extract_jsonrpc_error,
     mcp_message_target,
     request_evidence,
@@ -106,6 +108,7 @@ class ForeignOriginRejected(Check):
                 break
 
         if reference is None:
+            evidence.update(differential_status_evidence(r_no_origin, r_evil))
             return self._result(
                 Rating.NA,
                 f"Neither baseline request reached a 2xx success status (no "
@@ -119,7 +122,10 @@ class ForeignOriginRejected(Check):
                 evidence,
             )
 
-        if r_evil.status == 403:
+        evidence.update(differential_status_evidence(reference, r_evil))
+        rating = differential_bucket(r_evil.status == 403, reference, r_evil)
+
+        if rating == Rating.PASS:
             return self._result(
                 Rating.PASS,
                 f"A baseline request ({reference_label}) reached HTTP "
@@ -128,7 +134,7 @@ class ForeignOriginRejected(Check):
                 f"Origin is validated.",
                 evidence,
             )
-        if r_evil.status == reference.status:
+        if rating == Rating.FAIL:
             return self._result(
                 Rating.FAIL,
                 f"A baseline request ({reference_label}) reached HTTP "
@@ -268,27 +274,21 @@ class VersionHeaderEnforced(Check):
         if stop:
             return stop
 
-        if r_mutated.status == 400:
-            err = extract_jsonrpc_error(r_mutated.text)
-            code = err.get("code") if err else None
-            if code == -32020:
-                return self._result(
-                    Rating.PASS,
-                    f"A baseline request (matching header/body version) "
-                    f"reached HTTP {r_baseline.status}; the identical "
-                    f"request with a mismatched MCP-Protocol-Version header "
-                    f"({self._MISMATCHED_VERSION}) was rejected: HTTP 400 "
-                    f"with JSON-RPC error code -32020 (HeaderMismatch).",
-                    evidence,
-                )
+        evidence.update(differential_status_evidence(r_baseline, r_mutated))
+        code = evidence["mutation_error_code"]
+        rating = differential_bucket(r_mutated.status == 400 and code == -32020, r_baseline, r_mutated)
+
+        if rating == Rating.PASS:
             return self._result(
-                Rating.WARN,
-                f"The mismatched-header request got HTTP 400 (baseline "
-                f"reached HTTP {r_baseline.status}), but the JSON-RPC error "
-                f"code was {code!r}, not the expected -32020 (HeaderMismatch).",
+                Rating.PASS,
+                f"A baseline request (matching header/body version) "
+                f"reached HTTP {r_baseline.status}; the identical "
+                f"request with a mismatched MCP-Protocol-Version header "
+                f"({self._MISMATCHED_VERSION}) was rejected: HTTP 400 "
+                f"with JSON-RPC error code -32020 (HeaderMismatch).",
                 evidence,
             )
-        if r_mutated.status == r_baseline.status:
+        if rating == Rating.FAIL:
             return self._result(
                 Rating.FAIL,
                 f"A baseline request (matching header/body version) "
@@ -297,6 +297,14 @@ class VersionHeaderEnforced(Check):
                 f"({self._MISMATCHED_VERSION}) reached the exact same "
                 f"status — header/body consistency does not appear to be "
                 f"enforced for the protocol-version header.",
+                evidence,
+            )
+        if r_mutated.status == 400:
+            return self._result(
+                Rating.WARN,
+                f"The mismatched-header request got HTTP 400 (baseline "
+                f"reached HTTP {r_baseline.status}), but the JSON-RPC error "
+                f"code was {code!r}, not the expected -32020 (HeaderMismatch).",
                 evidence,
             )
         return self._result(
@@ -354,27 +362,21 @@ class HeaderBodyConsistency(Check):
         if stop:
             return stop
 
-        if r_mutated.status == 400:
-            err = extract_jsonrpc_error(r_mutated.text)
-            code = err.get("code") if err else None
-            if code == -32020:
-                return self._result(
-                    Rating.PASS,
-                    f"A baseline request (Mcp-Method matching the body) "
-                    f"reached HTTP {r_baseline.status}; the identical "
-                    f"request with Mcp-Method: {self._MISMATCHED_METHOD} "
-                    f"(body still declaring tools/list) was rejected: HTTP "
-                    f"400 with error code -32020 (HeaderMismatch).",
-                    evidence,
-                )
+        evidence.update(differential_status_evidence(r_baseline, r_mutated))
+        code = evidence["mutation_error_code"]
+        rating = differential_bucket(r_mutated.status == 400 and code == -32020, r_baseline, r_mutated)
+
+        if rating == Rating.PASS:
             return self._result(
-                Rating.WARN,
-                f"The mismatched-header request got HTTP 400 (baseline "
-                f"reached HTTP {r_baseline.status}), but the error code was "
-                f"{code!r}, not the expected -32020.",
+                Rating.PASS,
+                f"A baseline request (Mcp-Method matching the body) "
+                f"reached HTTP {r_baseline.status}; the identical "
+                f"request with Mcp-Method: {self._MISMATCHED_METHOD} "
+                f"(body still declaring tools/list) was rejected: HTTP "
+                f"400 with error code -32020 (HeaderMismatch).",
                 evidence,
             )
-        if r_mutated.status == r_baseline.status:
+        if rating == Rating.FAIL:
             return self._result(
                 Rating.FAIL,
                 f"A baseline request (Mcp-Method matching the body) reached "
@@ -384,6 +386,14 @@ class HeaderBodyConsistency(Check):
                 f"proxy trusting the header and a backend trusting the body "
                 f"could be routed to two different operations for the same "
                 f"request.",
+                evidence,
+            )
+        if r_mutated.status == 400:
+            return self._result(
+                Rating.WARN,
+                f"The mismatched-header request got HTTP 400 (baseline "
+                f"reached HTTP {r_baseline.status}), but the error code was "
+                f"{code!r}, not the expected -32020.",
                 evidence,
             )
         return self._result(
@@ -447,22 +457,28 @@ class UnsupportedVersionError(Check):
         if stop:
             return stop
 
+        evidence.update(differential_status_evidence(r_baseline, r_mutated))
+        code = evidence["mutation_error_code"]
         err = extract_jsonrpc_error(r_mutated.text)
-        code = err.get("code") if err else None
         supported = (err or {}).get("data", {}).get("supported") if err else None
 
+        rating = differential_bucket(code == -32022 and bool(supported), r_baseline, r_mutated)
+
+        if rating == Rating.PASS:
+            return self._result(
+                Rating.PASS,
+                f"A baseline request (real protocol version) reached "
+                f"HTTP {r_baseline.status}; the identical request with "
+                f"version {self._BOGUS_VERSION} consistently in header "
+                f"and body got JSON-RPC error -32022 "
+                f"(UnsupportedProtocolVersionError) listing the "
+                f"versions this server does support: {supported}.",
+                evidence,
+            )
         if code == -32022:
-            if supported:
-                return self._result(
-                    Rating.PASS,
-                    f"A baseline request (real protocol version) reached "
-                    f"HTTP {r_baseline.status}; the identical request with "
-                    f"version {self._BOGUS_VERSION} consistently in header "
-                    f"and body got JSON-RPC error -32022 "
-                    f"(UnsupportedProtocolVersionError) listing the "
-                    f"versions this server does support: {supported}.",
-                    evidence,
-                )
+            # Right error code, but the payload doesn't tell the agent what
+            # would work — an incomplete response, not a passing one, but
+            # also not "not rejected at all" either way.
             return self._result(
                 Rating.WARN,
                 f"The bogus-version request got error -32022 (baseline "
@@ -472,8 +488,7 @@ class UnsupportedVersionError(Check):
                 f"work.",
                 evidence,
             )
-
-        if r_mutated.status == r_baseline.status:
+        if rating == Rating.FAIL:
             return self._result(
                 Rating.FAIL,
                 f"A baseline request (real protocol version) reached HTTP "

@@ -33,11 +33,17 @@ same mandatory pattern:
    before drawing any conclusion. If the baseline does not succeed — it
    cannot be confirmed to have reached the validation stage for the
    property under test.
-4. Rate by comparing the mutated response to the baseline response. A mutated request that reaches
-   the *identical* outcome as the baseline means the mutation changed
-   nothing — that is a `FAIL`, regardless of what status code it is,
-   because an absolute-status check would have missed that the server never
-   distinguished the two requests at all.
+4. Rate by comparing the mutated response to the baseline response
+   (`_helpers.differential_bucket`, shared by TR-01/04/05/08 so the rule
+   can't drift apart between them): a mutated request that reaches the
+   *identical* status as the baseline means the mutation changed nothing —
+   that's a `FAIL` regardless of what the status code is, because an
+   absolute-status check would have missed that the server never
+   distinguished the two requests at all. A mutated request that *was*
+   rejected, but not in the exact way the spec requires (wrong status,
+   wrong JSON-RPC error code) is a `WARN`, not a `FAIL` — the server did
+   reject it, just not verifiably for the reason under test. `PASS` is
+   reserved for a rejection that matches the required shape exactly.
 5. Record the exact baseline and mutated request/response — see
    "Evidence requirement" below.
 
@@ -60,15 +66,25 @@ confirmed-successful baseline, a rejected mutation is ambiguous evidence.
 Every check result records the exact request(s) sent and response(s)
 received (method, URL, headers with bearer tokens redacted, body, status,
 a response-body snippet) for both the baseline and the mutation, so any
-finding is independently reproducible.
+finding is independently reproducible. A differential check (TR-01/04/05/08)
+additionally records flat `baseline_status`/`mutation_status`/
+`mutation_error_code`/`mutation_response_body` fields
+(`_helpers.differential_status_evidence`), so the detail text's narrated
+statuses ("baseline reached HTTP 200") are backed by values a reader (or
+another tool) can check without parsing the nested request/response blocks.
 
 The console only prints a check's details and results, never its `evidence`
 object. Evidence is exported to a JSON file when `--out` is passed:
 
 - `mcp-audit eval --url https://mcp.example.com/mcp --name "My Server" --auth --out report.json
-` writes the evidence file at `report.json`
-- `mcp-audit eval-file servers/servers.yaml --out results/` writes one evidence file per server into `results/` plus
-`results/summary.json`.
+` writes the evidence file at `report.json` — self-contained: server name,
+URL, `tool_version`, a run `timestamp`, and every check's full evidence.
+- `mcp-audit eval-file servers/servers.yaml --out results/` writes one such
+self-contained file per server into `results/`, plus a thin
+`results/summary.json` — per server, per check, only
+`rubric_id`/`rating`/`title`/`method`/`detail` (no evidence) and a
+`report_file` pointer to that server's full file (`TargetReport.
+to_summary_dict()`).
 
 ---
 

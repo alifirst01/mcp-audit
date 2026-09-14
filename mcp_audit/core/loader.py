@@ -25,8 +25,19 @@ import pathlib
 
 from .models import Target, Transport
 
-_AUTH_FIELDS = ("token", "client_id", "client_secret", "client_metadata_url",
-                "redirect_port", "scopes")
+# Canonical field name each accepted YAML/JSON key maps to. Both the
+# underscore form (matching AuthInput's own field names) and the hyphenated
+# form (matching how the equivalent CLI flag reads, e.g. --client-id) are
+# accepted, since a servers file is edited by hand.
+_AUTH_FIELD_ALIASES = {
+    "token": "token",
+    "client_id": "client_id", "client-id": "client_id",
+    "client_secret": "client_secret", "client-secret": "client_secret",
+    "client_metadata_url": "client_metadata_url",
+    "client-metadata-url": "client_metadata_url",
+    "redirect_port": "redirect_port", "redirect-port": "redirect_port",
+    "scopes": "scopes",
+}
 
 
 def _to_target(entry: dict) -> Target:
@@ -46,7 +57,11 @@ def _to_target(entry: dict) -> Target:
         category=entry.get("category"),
         notes=entry.get("notes"),
     )
-    auth_overrides = {k: entry[k] for k in _AUTH_FIELDS if k in entry}
+    auth_overrides = {
+        canonical: entry[key]
+        for key, canonical in _AUTH_FIELD_ALIASES.items()
+        if key in entry
+    }
     if auth_overrides:
         target.context["auth_overrides"] = auth_overrides
     return target
