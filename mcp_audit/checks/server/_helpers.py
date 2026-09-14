@@ -582,10 +582,8 @@ def auth_method_label(ctx) -> str:
 
 def scope_evidence(ctx) -> dict:
     """`requested_scopes`/`granted_scopes` for a check's evidence, split from
-    the session's space-separated scope strings into lists. Both are `[]`
-    when there's no session, or when nothing was requested/granted — which
-    is the default: mcp-audit requests no scope unless --scopes supplied
-    one (see core/oauth.authenticate)."""
+    the session's space-separated scope strings. `[]` when there's no
+    session or nothing was requested/granted."""
     session = ctx.auth_session
     requested = session.requested_scope.split() if session and session.requested_scope else []
     granted = session.scope.split() if session and session.scope else []

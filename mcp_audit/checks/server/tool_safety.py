@@ -52,12 +52,8 @@ _SCOPE_LIMITED_REASON = (
 
 
 def _scope_limited_reason(ctx: ProbeContext) -> Optional[str]:
-    """`_SCOPE_LIMITED_REASON` when an empty or refused tools/list could
-    plausibly be fixed by requesting a broader --scopes — i.e. a real OAuth
-    flow ran, so mcp-audit controls what scope was requested and could
-    request more. None for a static --token: its permissions come from
-    wherever it was issued, and --scopes has no effect on it, so blaming
-    scope there wouldn't be honest."""
+    """None for a static --token: its permissions aren't ours to widen with
+    --scopes, so blaming scope there would be misleading."""
     session = ctx.auth_session
     if not session or session.probe_evidence.get("auth_mode") == "supplied-token":
         return None
@@ -65,22 +61,15 @@ def _scope_limited_reason(ctx: ProbeContext) -> Optional[str]:
 
 
 def _looks_scope_related(err: str) -> bool:
-    """Best-effort read of a tools/list failure as scope-shaped: an
-    authenticated request refused with 401/403, or a JSON-RPC error whose
-    text mentions a scope problem (e.g. insufficient_scope). Not certain —
-    other things can also produce a 401 — hence the hedged "may require" in
-    _SCOPE_LIMITED_REASON rather than a flat assertion."""
     if err.startswith("unexpected-status:401") or err.startswith("unexpected-status:403"):
         return True
     return err.startswith("jsonrpc-error:") and "scope" in err.lower()
 
 
 def _fetch_error_result(check: Check, err: str, ctx: ProbeContext):
-    """Map a `fetch_tools` error string to a CheckResult. A scope-shaped
-    refusal is n/a with a limitation reason, not a false PASS/empty result
-    and not silently retried with broader scopes — see _scope_limited_reason.
-    Any other refusal with an active session is an error (the tool list
-    should have been reachable); everything else is n/a."""
+    """Map a `fetch_tools` error string to a CheckResult. A refusal with an
+    active session is an error (the tool list should have been reachable);
+    everything else is n/a."""
     if err == "stdio-no-http":
         return check._result(
             Rating.NA,

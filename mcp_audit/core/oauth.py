@@ -14,10 +14,9 @@ picks a path in priority order:
 On success it sets `ctx.auth_session`; on failure it sets `ctx.auth_failure`
 with a reason (never raises) that downstream checks and the CLI surface.
 
-For the two paths that run a real authorization request (2 and 3), the
-`scope` parameter is omitted by default — mcp-audit requests no scope at
-all unless `--scopes` supplies one, so the AS applies its own default grant.
-This is a minimal-privilege default.
+Paths 2 and 3 omit the `scope` parameter unless `--scopes` supplies one —
+a minimal-privilege default that lets the AS apply its own default grant
+rather than mcp-audit guessing at scope strings it can't validate.
 
 Secrets never reach evidence, the console, or JSON output — only the
 resulting `access_token` is held in memory (tests/test_oauth_no_secret_leak.py).
@@ -85,8 +84,7 @@ class AuthInput:
     # (the default) keeps the OS-assigned ephemeral port, unchanged.
     redirect_port: Optional[int] = None
     # Space-separated scope string for the authorization request (--scopes).
-    # None (the default) requests no scope at all — the AS applies its own
-    # default grant
+    # None (the default) omits `scope` entirely.
     scopes: Optional[str] = None
 
     def mode(self) -> str:
@@ -189,16 +187,12 @@ class LoopbackServer:
     """A one-shot HTTP server on 127.0.0.1 that captures the authorization
     callback's query string, then shuts itself down.
 
-    `port=0` (the default) binds an OS-assigned ephemeral port, so the
-    redirect URI's port varies between runs — fine for servers that honor
-    RFC 8252's loopback-any-port matching. A fixed `port` gives a stable
-    redirect URI (`http://127.0.0.1:<port>/callback`) across runs, for
-    providers that require an exact pre-registered redirect URI and don't
-    treat a varying port as a match (e.g. GitHub OAuth Apps). If that fixed
-    port is already in use, this raises immediately rather than silently
-    falling back to a random one — a silent fallback would register one
-    redirect_uri and then send the browser to a different one, a mismatch
-    the operator would otherwise have to debug blind."""
+    `port=0` (the default) binds an OS-assigned ephemeral port, fine for
+    servers honoring RFC 8252's loopback-any-port matching. A fixed `port`
+    gives a stable redirect URI for providers that pre-register it exactly
+    (e.g. GitHub OAuth Apps). If that port is already in use, this raises
+    rather than silently falling back to a random one, which would send the
+    browser to a redirect_uri other than the one registered."""
 
     def __init__(self, port: int = 0):
         self.result: Optional[dict] = None
@@ -495,10 +489,6 @@ def authenticate(target, ctx: ProbeContext, auth_input: Optional[AuthInput] = No
         verifier, challenge = pkce_pair()
         state = secrets.token_urlsafe(16)
         resource = target.url.rstrip("/") if target.url else ""
-        # Minimal by default: request no scope at all unless the operator
-        # opts in with --scopes. The AS then applies its own default grant.
-        # Applies uniformly to both the DCR and preconfigured-client paths —
-        # this is their one shared code path below.
         requested_scope = auth_input.scopes or None
 
         authorize_url = build_authorize_url(
