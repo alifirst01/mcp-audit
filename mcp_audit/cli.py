@@ -405,30 +405,26 @@ def _cmd_rubric(args):
 # Command handlers
 # ---------------------------------------------------------------------------
 
-def _build_auth_input(args) -> AuthInput:
-    """Resolve --auth credential material: supplied token, or supplied client
-    credentials, or fully-automatic — mutually exclusive, see AuthInput.
-    Credentials are taken only from CLI flags, never environment variables:
-    an explicit flag on the invocation that ran is the only source."""
-    token = args.token
-    client_id = args.client_id
-    client_secret = args.client_secret
-    client_metadata_url = args.client_metadata_url
-    redirect_port = args.redirect_port
-    scopes = args.scopes
+def _resolve_auth_input(*, token, client_id, client_secret, client_metadata_url,
+                        redirect_port, scopes, source: str = "") -> AuthInput:
+    """Validate one set of credential fields and build an AuthInput from
+    them — mutually exclusive, see AuthInput. `source` names where a
+    conflict came from (e.g. a server entry) for the error message; empty
+    for the top-level CLI flags."""
+    where = f" ({source})" if source else ""
 
     if client_secret and not client_id:
-        print("mcp-audit: --client-secret requires --client-id", file=sys.stderr)
+        print(f"mcp-audit: client_secret requires client_id{where}", file=sys.stderr)
         sys.exit(2)
     if client_id and client_metadata_url:
-        print("mcp-audit: pass either --client-id or --client-metadata-url, not both",
+        print(f"mcp-audit: pass either client_id or client_metadata_url, not both{where}",
               file=sys.stderr)
         sys.exit(2)
     if token and (client_id or client_metadata_url):
-        conflicting = "--client-id/--client-secret" if client_id else "--client-metadata-url"
-        print(f"mcp-audit: --token and {conflicting} are mutually "
-              f"exclusive — they authenticate a run in different ways (skip the OAuth "
-              f"flow entirely vs. run it with a pre-registered client). Pass one, not both.",
+        conflicting = "client_id/client_secret" if client_id else "client_metadata_url"
+        print(f"mcp-audit: token and {conflicting} are mutually exclusive — they "
+              f"authenticate in different ways (skip the OAuth flow entirely vs. run "
+              f"it with a pre-registered client). Pass one, not both{where}.",
               file=sys.stderr)
         sys.exit(2)
 
@@ -439,6 +435,33 @@ def _build_auth_input(args) -> AuthInput:
         client_metadata_url=client_metadata_url,
         redirect_port=redirect_port,
         scopes=scopes,
+    )
+
+
+def _build_auth_input(args) -> AuthInput:
+    """Resolve --auth credential material from the CLI flags only — never
+    environment variables."""
+    return _resolve_auth_input(
+        token=args.token, client_id=args.client_id, client_secret=args.client_secret,
+        client_metadata_url=args.client_metadata_url, redirect_port=args.redirect_port,
+        scopes=args.scopes,
+    )
+
+
+def _target_auth_input(target, args) -> AuthInput:
+    """AuthInput for one target in a servers-file run: its own `token`/
+    `client_id`/... entry (see core/loader.py) wins field-by-field over the
+    `eval-file` CLI flags, which apply only where a target leaves a field
+    unset."""
+    overrides = target.context.get("auth_overrides", {})
+    return _resolve_auth_input(
+        token=overrides.get("token", args.token),
+        client_id=overrides.get("client_id", args.client_id),
+        client_secret=overrides.get("client_secret", args.client_secret),
+        client_metadata_url=overrides.get("client_metadata_url", args.client_metadata_url),
+        redirect_port=overrides.get("redirect_port", args.redirect_port),
+        scopes=overrides.get("scopes", args.scopes),
+        source=f"server {target.name!r}",
     )
 
 
@@ -521,14 +544,16 @@ def _cmd_eval_file(args):
     outdir = pathlib.Path(args.out) if args.out else None
     if outdir:
         outdir.mkdir(parents=True, exist_ok=True)
-    auth_input = _build_auth_input(args)
-    # A supplied credential applies to every target without prompting —
-    # only the no-credential case falls back to asking per target.
-    has_supplied_credential = auth_input.mode() != "auto"
+    # Resolved (and validated) up front for every target, so a bad
+    # credential combination in one server entry is caught before any
+    # network call runs, not partway through the batch.
+    auth_inputs = [_target_auth_input(t, args) for t in targets]
     summary = []
     total = len(targets)
-    for i, target in enumerate(targets, start=1):
-        include_auth = has_supplied_credential or _confirm_auth(target.name)
+    for i, (target, auth_input) in enumerate(zip(targets, auth_inputs), start=1):
+        # A supplied credential applies to this target without prompting —
+        # only the no-credential case falls back to asking.
+        include_auth = auth_input.mode() != "auto" or _confirm_auth(target.name)
         with _progress(target.name) as on_result:
             report = evaluate(target, include_auth=include_auth, auth_input=auth_input,
                                on_result=on_result)
