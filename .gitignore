@@ -9,3 +9,5 @@ results/*.json
 admin/
 .idea
 *.json
+.secrets.yaml
+.secrets.yml

@@ -18,7 +18,7 @@ It is **read-only and non-destructive**. It sends the requests a conforming clie
 | Transport & Protocol | TR-01…TR-08 | HTTPS everywhere; `Origin` validation (DNS-rebinding); protocol-version enforcement; header/body consistency |
 | Tool Safety & Blast Radius | TS-01…TS-03 | unrestricted-access tools; read/write separation; external-content injection surface |
 
-Each check is evaluated one of three ways, shown in its output as a **method**:
+Each check is evaluated one of three ways, shown in its output as a method:
 
 | Method | Meaning |
 |--------|---------|
@@ -38,7 +38,7 @@ Each check is evaluated one of three ways, shown in its output as a **method**:
 ## Install
 
 ```bash
-git clone <repo-url> && cd mcp-audit
+git clone https://github.com/alifirst01/mcp-audit.git && cd mcp-audit
 pip install -e .
 ```
 
@@ -130,7 +130,10 @@ mcp-audit eval --url https://mcp.example.com/mcp --auth --scopes "read:user read
 
 ## Input: server list
 
-`eval-file` reads a YAML or JSON list of servers:
+`eval-file` reads a YAML or JSON list of servers. Per-server credential
+fields (`token`, `client-id`/`client-secret`, `client-metadata-url`,
+`redirect-port`, `scopes` — underscore or hyphenated, both work) override
+the matching `eval-file` flag for that server only:
 
 ```yaml
 - name: Sentry MCP
@@ -139,13 +142,32 @@ mcp-audit eval --url https://mcp.example.com/mcp --auth --scopes "read:user read
   url: https://mcp.asana.com/sse
 - name: Neon MCP
   url: https://mcp.neon.tech/mcp
-  token: <value>
+  token: ${NEON_TOKEN}
 - name: Github MCP
   url: https://api.githubcopilot.com/mcp
   redirect_port: 8765
-  client-id: <value>
-  client-secret: <value>
+  client-id: ${GITHUB_CLIENT_ID}
+  client-secret: ${GITHUB_CLIENT_SECRET}
 ```
+
+**Keeping real credentials out of the servers file:** `${VAR_NAME}` anywhere
+in any field is substituted from `.secrets.yaml` (or `.secrets.yml`/
+`.secrets.json`) in the *same directory* as the servers file — a flat
+`VAR_NAME: value` mapping, e.g.:
+
+```yaml
+# servers/.secrets.yaml — gitignored, never commit this
+GITHUB_CLIENT_ID: your-client-id
+GITHUB_CLIENT_SECRET: your-client-secret
+NEON_TOKEN: your-neon-api-key
+```
+
+`.secrets.yaml`/`.secrets.yml` are in `.gitignore` (`.secrets.json` is
+covered by the repo's blanket `*.json` rule); `servers/.secrets.yaml.example`
+is a tracked, credential-free template — copy it to `.secrets.yaml` and
+fill in real values. A `${VAR_NAME}` the secrets file doesn't define is a
+load-time error naming the server and the variable, not a silently-sent
+literal string.
 
 ## Methodology & limitations
 

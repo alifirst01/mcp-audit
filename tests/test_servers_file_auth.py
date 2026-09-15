@@ -49,6 +49,65 @@ def test_loader_reads_per_server_auth_fields(tmp_path):
     assert "auth_overrides" not in by_name["Plain"].context
 
 
+def test_loader_interpolates_variables_from_sibling_secrets_file(tmp_path):
+    (tmp_path / ".secrets.yaml").write_text(
+        "GITHUB_CLIENT_ID: cid-123\nGITHUB_CLIENT_SECRET: shh\n"
+    )
+    servers_yaml = tmp_path / "servers.yaml"
+    servers_yaml.write_text(
+        "- name: GitHub\n"
+        "  url: https://api.githubcopilot.com/mcp\n"
+        "  client-id: ${GITHUB_CLIENT_ID}\n"
+        "  client-secret: ${GITHUB_CLIENT_SECRET}\n"
+    )
+    targets = load_targets(str(servers_yaml))
+    assert targets[0].context["auth_overrides"] == {
+        "client_id": "cid-123", "client_secret": "shh",
+    }
+
+
+def test_loader_interpolation_supports_partial_string_substitution(tmp_path):
+    (tmp_path / ".secrets.yaml").write_text("TOKEN_SUFFIX: abc123\n")
+    servers_yaml = tmp_path / "servers.yaml"
+    servers_yaml.write_text(
+        "- name: Neon\n  url: https://mcp.neon.tech/mcp\n  token: napi_${TOKEN_SUFFIX}\n"
+    )
+    targets = load_targets(str(servers_yaml))
+    assert targets[0].context["auth_overrides"]["token"] == "napi_abc123"
+
+
+def test_loader_missing_variable_errors_clearly_naming_server_and_var(tmp_path):
+    servers_yaml = tmp_path / "servers.yaml"
+    servers_yaml.write_text(
+        "- name: GitHub\n  url: https://api.githubcopilot.com/mcp\n"
+        "  client-id: ${UNDEFINED_VAR}\n"
+    )
+    with pytest.raises(ValueError) as e:
+        load_targets(str(servers_yaml))
+    assert "GitHub" in str(e.value)
+    assert "UNDEFINED_VAR" in str(e.value)
+
+
+def test_loader_no_secrets_file_is_fine_when_nothing_references_a_variable(tmp_path):
+    servers_yaml = tmp_path / "servers.yaml"
+    servers_yaml.write_text("- name: Sentry\n  url: https://mcp.sentry.dev/mcp\n")
+    targets = load_targets(str(servers_yaml))
+    assert targets[0].name == "Sentry"
+
+
+def test_loader_secrets_file_never_needed_for_plain_servers(tmp_path):
+    (tmp_path / ".secrets.yaml").write_text("GITHUB_CLIENT_ID: cid\n")
+    servers_yaml = tmp_path / "servers.yaml"
+    servers_yaml.write_text(
+        "- name: GitHub\n  url: https://api.githubcopilot.com/mcp\n  client-id: ${GITHUB_CLIENT_ID}\n"
+        "- name: Sentry\n  url: https://mcp.sentry.dev/mcp\n"
+    )
+    targets = load_targets(str(servers_yaml))
+    by_name = {t.name: t for t in targets}
+    assert by_name["GitHub"].context["auth_overrides"]["client_id"] == "cid"
+    assert "auth_overrides" not in by_name["Sentry"].context
+
+
 def test_loader_accepts_hyphenated_field_names(tmp_path):
     """A servers file is hand-edited; --client-id's CLI spelling is a
     natural (and easy) mistake to make in YAML too."""
