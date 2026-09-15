@@ -1,795 +1,269 @@
 # MCP Audit — Methodology
 
-This document defines the evaluation method, evidence collected, and known
-limitations for each check in `docs/RUBRIC.md`.
+Evaluation method, evidence collected, and known limitations for each check in `docs/RUBRIC.md`.
 
-## Method reference
+## Methods and statuses
 
 | Method | Definition |
-|--------|---------------|
+|--------|------------|
 | **Probe** | An unauthenticated HTTP request; no credentials required. |
-| **Auth** | Requires a completed OAuth 2.1 session (`--auth`). mcp-audit executes a full authorization-code flow with PKCE — see "How the OAuth flow works" below. |
-| **Doc** | Assessed from documentation, source, configuration, or comparison against an external reference not obtainable from MCP traffic alone, such as the vendor's published API reference. |
+| **Auth** | Requires a completed OAuth 2.1 session (`--auth`) — a full authorization-code flow with PKCE (see [How the OAuth flow works](#how-the-oauth-flow-works)). |
+| **Doc** | Assessed from documentation, source, config, or an external reference (e.g. the vendor's API docs) not obtainable from MCP traffic alone. |
 
-## Status reference
+| Status | Meaning |
+|--------|---------|
+| **live** | Implemented and evaluated today. |
+| **planned** | Not yet implemented. |
 
-| Status | Meaning                                      |
-|--------|----------------------------------------------|
-| **live** | Implemented and evaluated today.             |
-| **planned** | Not yet implemented. Displayed as "Planned." |
+## Differential testing
 
+Every Probe/Auth check that mutates a request to test rejection (spoofed header, omitted parameter, unregistered value) follows one pattern, shared via `_helpers.differential_bucket` so the rule can't drift between checks:
 
-## Differential-testing requirement
+1. Establish a valid baseline using the exact request shape a real client uses successfully.
+2. Mutate exactly one property; leave everything else identical.
+3. Confirm the baseline itself reaches the property's validation stage. If it doesn't, the check reports **not-tested** — a mutated-request rejection proves nothing if the baseline never got that far.
+4. Rate by comparing mutated vs baseline response:
+   - **FAIL** — mutated reaches the *identical* status as baseline: the server never distinguished the two requests (true regardless of status code).
+   - **WARN** — mutated *was* rejected, but not in the exact spec-required way (wrong status or JSON-RPC error code).
+   - **PASS** — rejection matches the required shape exactly.
+5. Record the baseline and mutated request/response (see [Evidence](#evidence)).
 
-Every Probe or Auth check that mutates a request to test rejection — a
-spoofed header, an omitted parameter, an unregistered value — follows the
-same mandatory pattern:
+## Evidence
 
-1. Establish a valid baseline by sending a request built from the exact shape a
-   real client would successfully send.
-2. Mutate exactly one property under test, leaving everything else in
-   the baseline unchanged.
-3. Confirm the baseline itself reaches the property's validation stage
-   before drawing any conclusion. If the baseline does not succeed — it
-   cannot be confirmed to have reached the validation stage for the
-   property under test.
-4. Rate by comparing the mutated response to the baseline response
-   (`_helpers.differential_bucket`, shared by TR-01/04/05/08 so the rule
-   can't drift apart between them): a mutated request that reaches the
-   *identical* status as the baseline means the mutation changed nothing —
-   that's a `FAIL` regardless of what the status code is, because an
-   absolute-status check would have missed that the server never
-   distinguished the two requests at all. A mutated request that *was*
-   rejected, but not in the exact way the spec requires (wrong status,
-   wrong JSON-RPC error code) is a `WARN`, not a `FAIL` — the server did
-   reject it, just not verifiably for the reason under test. `PASS` is
-   reserved for a rejection that matches the required shape exactly.
-5. Record the exact baseline and mutated request/response — see
-   "Evidence requirement" below.
+Every result records the exact request(s) and response(s) — method, URL, headers (bearer tokens redacted), body, status, body snippet — for both baseline and mutation, so any finding is reproducible. Differential checks (TR-01/04/05/08) additionally record flat `baseline_status` / `mutation_status` / `mutation_error_code` / `mutation_response_body` fields, so narrated statuses are machine-checkable without parsing nested blocks.
 
+The console prints only details and results, never `evidence`. Evidence is written to disk with `--out`:
 
-**Worked example — TR-01 (foreign `Origin` header).** The baseline is a
-`tools/list` request with no `Origin` header (or same-origin), sent using
-the exact request shape a real client uses to list tools successfully. The
-mutation is the identical request with `Origin: http://evil.attacker.example.com`
-added. The check compares the two: if the baseline succeeds and the
-mutated request is rejected specifically because of the Origin header, that
-is `PASS`. If the baseline itself fails to reach the Origin-validation stage
-— for instance if the server rejects it for an unrelated reason — the check
-reports `not-tested`, because a mutated-request rejection in that case
-proves nothing about Origin handling specifically. This is why the check
-never sends a bare, hand-built Origin probe in isolation: without a
-confirmed-successful baseline, a rejected mutation is ambiguous evidence.
+- `eval --out report.json` — one self-contained file: server name, URL, `tool_version`, run `timestamp`, and every check's full evidence.
+- `eval-file --out results/` — one self-contained file per server, plus a thin `results/summary.json` (per check: `rubric_id`/`rating`/`title`/`method`/`detail`, no evidence, plus a `report_file` pointer).
 
-## Evidence requirement
+## Auth-mode token safety
 
-Every check result records the exact request(s) sent and response(s)
-received (method, URL, headers with bearer tokens redacted, body, status,
-a response-body snippet) for both the baseline and the mutation, so any
-finding is independently reproducible. A differential check (TR-01/04/05/08)
-additionally records flat `baseline_status`/`mutation_status`/
-`mutation_error_code`/`mutation_response_body` fields
-(`_helpers.differential_status_evidence`), so the detail text's narrated
-statuses ("baseline reached HTTP 200") are backed by values a reader (or
-another tool) can check without parsing the nested request/response blocks.
-
-The console only prints a check's details and results, never its `evidence`
-object. Evidence is exported to a JSON file when `--out` is passed:
-
-- `mcp-audit eval --url https://mcp.example.com/mcp --name "My Server" --auth --out report.json
-` writes the evidence file at `report.json` — self-contained: server name,
-URL, `tool_version`, a run `timestamp`, and every check's full evidence.
-- `mcp-audit eval-file servers/servers.yaml --out results/` writes one such
-self-contained file per server into `results/`, plus a thin
-`results/summary.json` — per server, per check, only
-`rubric_id`/`rating`/`title`/`method`/`detail` (no evidence) and a
-`report_file` pointer to that server's full file (`TargetReport.
-to_summary_dict()`).
-
----
-
-## Auth-mode
-
-Every `Auth`-method check completes a real OAuth 2.1 authorization-code
-flow and handles a real user access token.
-
-- The access token (and refresh token, if
-  issued) is held only in memory, on the run's `AuthSession`/`ProbeContext`,
-  for the duration of that run. It is not written to disk.
-- The raw token value is never placed in a log line.
-- The raw token value is never placed
-  in a check's `evidence` dict, so it never appears in the JSON `--out`
-  report or in console output.
-
----
+Every `Auth` check completes a real OAuth 2.1 authorization-code flow and handles a real access token. The token (and refresh token, if issued) is held in memory only for the run's duration — never written to disk, never logged, never placed in any check's `evidence`, so it appears in neither `--out` reports nor console output.
 
 ## How the OAuth flow works
 
-Three credential paths, via `AuthInput` (`mcp_audit/core/oauth.py`). A
-supplied token and supplied client credentials are mutually exclusive —
-`cli._build_auth_input()` exits with an error if both are given, since they
-authenticate a run in fundamentally different ways. Supplying either
-authenticates on its own; bare `--auth` is only needed to select Path 3, the
-zero-credential automatic path.
+Three credential paths via `AuthInput` (`core/oauth.py`). A supplied token and supplied client credentials are mutually exclusive (`cli._build_auth_input()` errors if both are given). Supplying either authenticates on its own; bare `--auth` selects only Path 3.
 
-### Path 1 — static token (`--token`)
+**Path 1 — static token (`--token`).**
+- Builds an `AuthSession` directly from the supplied value — no discovery, no network calls, no browser.
+- Used as-is for `initialize` and every authenticated request (tools/list, transport probes, CT-01/03/04), exactly like an OAuth token. Surfaced as `auth_method: static-token`.
+- Only checks needing a token mcp-audit itself issued report `n/a`: AA-02/03/04 (no interactive flow to probe) and CT-05 (no token response to inspect).
 
-If a token is supplied, `_authenticate_with_supplied_token()` builds an
-`AuthSession` directly from it — no discovery requirement, no network
-calls, no browser, no `--auth` flag needed. The session's `resource` is set
-to the target URL for the checks that compare it against a claim, and
-`probe_evidence["auth_mode"] = "supplied-token"` marks it so later checks
-can tell (surfaced in evidence as `auth_method: "static-token"`; Paths 2
-and 3 surface `"preconfigured-client"` and `"dcr"` respectively —
-`auth_method_label()` in `checks/server/_helpers.py`).
+**Path 2 — supplied client credentials (`--client-id`/`--client-secret`).**
+- For servers requiring pre-registration. Runs the full interactive flow (PKCE, loopback listener, browser consent, token exchange) identically to Path 3, but skips client registration — `ClientCredentials` is built from the supplied values. Surfaced as `preconfigured-client`.
+- Because a real token is obtained via a real flow, AA-02/03/04 and CT-05 run normally.
+- **Redirect port:** `LoopbackServer` binds `("127.0.0.1", 0)` by default (OS-assigned port). That suits an AS treating any loopback port as a match (RFC 8252 §7.3), but not one requiring exact redirect-URI match including port (GitHub OAuth Apps). `--redirect-port <port>` binds a fixed port so `redirect_uri` is stable and can be registered once. If the port is taken, it raises immediately naming the port rather than silently picking another (which would fail downstream with no obvious cause).
+- **Confidential client:** with `--client-secret`, `_token_request()` authenticates at the token endpoint via HTTP Basic first (`client_secret_basic`), falling back once to the form body (`client_secret_post`) if Basic is rejected — some ASes accept only one and metadata doesn't say which. The same helper backs the initial exchange and CT-05's refresh.
 
-The token is used as-is for the `initialize` handshake and every
-authenticated request after it (tools/list, transport probes, CT-01/03/04)
-exactly like an OAuth-obtained token. Only checks that need a token
-mcp-audit itself issued report `n/a` instead of running: AA-02/03/04 (no
-interactive flow occurred to probe PKCE/redirect-URI/issuer handling) and
-CT-05 (no OAuth token response exists to check `expires_in` or test
-refresh rotation against).
-
-### Path 2 — supplied client credentials (`--client-id`/`--client-secret`, or `--client-metadata-url`)
-
-For servers that require pre-registration and don't support self-registration. The operator pre-registers an OAuth app by hand, then
-supplies its identity. This runs the **full interactive flow** — PKCE,
-loopback listener, browser consent, token exchange — identically to Path 3,
-except client registration is skipped: `ClientCredentials` is built directly
-from the supplied `--client-id`/`--client-secret` (or `--client-metadata-url`,
-used as the `client_id` value.
-
-The loopback listener (`LoopbackServer`, `core/oauth.py`) binds
-`("127.0.0.1", 0)` by default, so its redirect URI's port is OS-assigned and
-different every run — fine for an AS that treats any loopback port as a
-match (RFC 8252 §7.3), but not for a provider whose pre-registered redirect
-URI must match exactly, port included (GitHub OAuth Apps do exact matching
-on the whole URL). `--redirect-port <port>` binds that fixed port instead,
-so `redirect_uri` is `http://127.0.0.1:<port>/callback` on every run and can
-be registered once. If the port is already bound by something else,
-`LoopbackServer` raises immediately naming the port — it never silently
-falls back to a random one, which would otherwise send the AS to a
-different redirect_uri than the one registered and fail well downstream
-with no obvious cause.
-
-A confidential client (`--client-secret` supplied) authenticates at the
-token endpoint via `_token_request()`: HTTP Basic first (RFC 6749 §2.3.1's
-preferred `client_secret_basic`), falling back once to the secret in the
-form body (`client_secret_post`) if Basic is rejected — some ASes (GitHub
-included) only accept one of the two, and metadata doesn't reliably say
-which. The same helper backs both the initial exchange and CT-05's refresh,
-so a confidential client's refresh authenticates the same way the exchange
-did instead of failing with "client_secret required." This path produces a
-real OAuth token via a real flow, so — unlike Path 1 — AA-02/03/04 and CT-05
-run normally rather than reporting `n/a`.
-
-### Path 3 — auto (bare `--auth`, nothing else supplied)
-
-The zero-config path: `register_client()` self-registers via Client
-ID Metadata Documents or, failing
-that, Dynamic Client Registration (RFC 7591, a POST to
-`registration_endpoint` — the MCP specification's deprecated fallback,
-kept for Authorization Servers that don't yet support Client ID Metadata
-Documents). If the Authorization Server advertises neither, `register_client()`
-raises, which surfaces as an `AuthFailure` telling the operator to retry with
-Path 2 instead.
+**Path 3 — auto (bare `--auth`).**
+- `register_client()` self-registers via Client ID Metadata Documents, or failing that Dynamic Client Registration (RFC 7591, the spec's deprecated fallback).
+- If the AS advertises neither, it raises an `AuthFailure` telling the operator to use Path 2.
 
 ---
 
 ## 1. Connection & Discovery
 
-A client with no prior knowledge of the server can learn that login
-is required, discover its Authorization Server, and determine how it can
-register as a client.
+A client with no prior knowledge can learn that login is required, discover its Authorization Server, and determine how to register.
+**Spec:** [Discovery](https://modelcontextprotocol.io/specification/draft/basic/authorization/authorization-server-discovery), [Client Registration](https://modelcontextprotocol.io/specification/draft/basic/authorization/client-registration). All require a live HTTP endpoint (n/a for stdio).
 
-**MCP specification:** [Discovery](https://modelcontextprotocol.io/specification/draft/basic/authorization/authorization-server-discovery), [Client Registration](https://modelcontextprotocol.io/specification/draft/basic/authorization/client-registration)
+**CD-01 — Unauthenticated requests are rejected.**
+- **Sends:** an unauthenticated GET to the MCP endpoint.
+- **Evidence:** status, URL.
 
-All checks in this section require a live HTTP endpoint and are not
-applicable to stdio-only targets.
+**CD-02 — Protected Resource Metadata is published.**
+- **Sends:** fetches PRM, trying in order — the header-pointer URL, `/.well-known/oauth-protected-resource<path>` (RFC 9728 §4.2), then root.
+- **Evidence:** contents, URL, Authorization Server(s), advertised scopes.
 
-### CD-01 — Unauthenticated requests are rejected (`discovery-login-required`)
+**CD-03 — Authorization Server metadata is published.**
+- **Sends:** reads `authorization_servers[0]` from PRM; tries RFC 8414 path-insertion, OIDC path-insertion, and OIDC path-appending in spec priority.
+- **Evidence:** URL, variant used, PKCE methods, registration endpoint, CIMD support flag.
 
-Sends an unauthenticated GET to the configured MCP endpoint.
+**CD-04 — Client registration mechanism is classified.**
+- **Reads:** `client_id_metadata_document_supported` and `registration_endpoint`.
+- **Rates:** PASS if CIMD supported (whether or not DCR is too — the spec permits both); WARN if only `registration_endpoint` (relies solely on the deprecated mechanism); WARN if neither (pre-registration-only or undetected).
 
-**Evidence:** HTTP status, endpoint URL.
+**CD-05 — 401 includes a resource-metadata pointer.**
+- **Reads:** `WWW-Authenticate` from the cached CD-01 response; extracts `resource_metadata`.
+- **Evidence:** header value, extracted URL.
 
-### CD-02 — Protected Resource Metadata is published (`discovery-authorization-server`)
+**CD-06 — Metadata reachable via both discovery paths.**
+- **Verifies:** the header-pointer path and the well-known path independently resolve; passes only if both do.
+- **Evidence:** which path(s) resolved, URLs tried.
 
-Fetches the Protected Resource Metadata document, trying, in
-order: 
-- the URL from header pointer
-- `/.well-known/oauth-protected-resource<path>` (path-specific, RFC 9728 §4.2)
-- `/.well-known/oauth-protected-resource` (root)
+**CD-07 — AS metadata issuer is self-consistent.**
+- **Compares:** `as_metadata["issuer"]` against the issuer implied by the fetch URL (RFC 8414 §3.3 / OIDC §4.1).
+- **Evidence:** both issuer values, discovery URL.
 
-**Evidence:** Document contents, URL retrieved, Authorization Server(s)
-listed, advertised scopes.
-
-### CD-03 — Authorization Server metadata is published (`discovery-as-config`)
-
-Reads `authorization_servers[0]` from the Protected Resource
-Metadata. Tries RFC 8414 path-insertion, OIDC path-insertion, and OIDC
-path-appending, in MCP specification priority order.
-
-**Evidence:** Metadata URL, variant used, PKCE methods advertised,
-registration endpoint, Client ID Metadata Document support flag.
-
-### CD-04 — Client registration mechanism is classified (`registration-priority`)
-
-Reads `client_id_metadata_document_supported` and
-`registration_endpoint` from `as_metadata`.
-
-**Evidence:** Both field values.
-
-**Rating logic:** `PASS` if `client_id_metadata_document_supported` is true
-— whether or not `registration_endpoint` is also present, since the 
-MCP specification explicitly permits an Authorization Server to support both
-(Dynamic Client Registration remains available "for backwards compatibility
-with authorization servers that do not support Client ID Metadata
-Documents"). `WARN` if only `registration_endpoint` is present: the
-Authorization Server relies solely on the deprecated mechanism. `WARN` if
-neither is present (pre-registration-only or undetected).
-
-### CD-05 — 401 response includes a resource-metadata pointer (`discovery-login-pointer`)
-
-Reads `WWW-Authenticate` from the CD-01 response (cached; no
-additional request). Extracts the `resource_metadata="<URL>"` parameter.
-
-**Evidence:** Header value, extracted URL.
-
-### CD-06 — Metadata is reachable via both discovery paths (`discovery-dual-path`)
-
-Verifies the header-pointer path and the well-known path
-independently resolve to a valid document. Passes only if both resolve.
-
-**Evidence:** Which path(s) resolved, URLs tried.
-
-### CD-07 — Authorization Server metadata issuer is self-consistent (`discovery-as-config-consistent`)
-
-Compares `as_metadata["issuer"]` against the issuer implied by
-the well-known URL it was fetched from (RFC 8414 §3.3 / OIDC §4.1).
-
-
-**Evidence:** Both issuer values, discovery URL.
-
-### CD-08 — SSRF protections for Client ID Metadata Document retrieval are documented (`registration-ssrf-protection`)
-
-Per the MCP specification's Authorization Server Abuse Protection guidance: an
-Authorization Server fetching a client's Client ID Metadata Document (a
-client-supplied URL) SHOULD mitigate Server-Side Request Forgery risk
-(allowlisting, blocking internal network addresses, timeouts and
-response-size limits). Not verifiable by black-box probing.
-
----
+**CD-08 — SSRF protection for CIMD retrieval is documented.** *Doc.*
+- Per the spec's abuse-protection guidance, an AS fetching a client-supplied CIMD URL SHOULD mitigate SSRF (allowlisting, blocking internal addresses, timeouts, size limits).
+- **Limitation:** not verifiable by black-box probing.
 
 ## 2. Authentication & Authorization
 
-How the client proves identity, and what the resulting token permits: whether
-it can complete an authorization-code flow safely, and whether the resulting
-grant is appropriately scoped.
+How the client proves identity and whether the resulting grant is safely scoped.
+**Spec:** [Security Considerations](https://modelcontextprotocol.io/specification/draft/basic/authorization/security-considerations), [Auth Overview](https://modelcontextprotocol.io/specification/draft/basic/authorization). Auth checks require a completed `--auth` session.
 
-**MCP specification:** [Security Considerations](https://modelcontextprotocol.io/specification/draft/basic/authorization/security-considerations), [Auth Overview](https://modelcontextprotocol.io/specification/draft/basic/authorization)
+**AA-01 — PKCE (S256) advertised.**
+- **Reads:** `code_challenge_methods_supported` from AS metadata.
 
-All `Auth`-method checks require a completed `--auth` session (see "How the
-OAuth flow works" above).
+**AA-02 — Unregistered redirect URIs rejected.** *Differential.*
+- **Baseline:** GET to `authorization_endpoint` with the client ID, the *registered* redirect URI, and the PKCE challenge the flow just used successfully.
+- **Mutated:** identical request with only `redirect_uri` changed to an attacker address. Using the real registered URI in the baseline matters — a never-registered baseline URI could be rejected for the wrong reason and still look like PASS.
+- **Rates:** FAIL if mutated redirects to the attacker address; PASS if mutated reaches a different status (and doesn't redirect there); WARN if identical status (ASes validating redirect URIs only after login produce this); not-tested if the baseline gets a generic rejection (400/422) before reaching validation.
+- **Evidence:** full request/response for both probes.
 
-### AA-01 — PKCE (S256) is advertised (`oauth-pkce-advertised`)
+**AA-03 — PKCE enforced.** *Differential.*
+- **Baseline:** as AA-02.
+- **Mutated:** identical request with `code_challenge` omitted.
+- **Rates:** FAIL if mutated is issued a code; PASS if different status or explicit `error`; WARN if identical status with no error/code (the probe carries no session cookies, so enforcement can't be confirmed); not-tested on a generic-rejection baseline.
+- **Evidence:** full request/response for both probes.
 
-Reads `code_challenge_methods_supported`
-from `as_metadata`.
+**AA-04 — Authorization response issuer validated.**
+- **Compares:** callback `iss` (RFC 9207) against `as_metadata["issuer"]`.
+- **Rates:** WARN (not FAIL) if `iss` is absent — a conforming client should refuse the code.
 
-### AA-02 — Unregistered redirect URIs are rejected (`oauth-redirect-uri-rejected`)
-
-Differential test: baseline is a direct GET to `authorization_endpoint` using the
-client identifier, *registered* redirect URI, and PKCE `code_challenge` the
-completed flow just used successfully
-(`session.probe_evidence["registered_redirect_uri"]` / `["pkce_challenge"]`,
-stashed by `core/oauth.py`). Mutated is the identical request with only
-`redirect_uri` changed to `https://evil.attacker.example/callback`. Using
-the *real* registered redirect URI in the baseline matters — a throwaway,
-never-registered redirect URI even for the baseline side of the comparison
-would let a server that validates redirect URIs before PKCE reject the
-probe for the wrong reason and still look like a PASS.
-
-**Rating logic:** `FAIL` if the mutated request redirects straight to the
-attacker-controlled address. `PASS` if the mutated request reaches a
-different status than the baseline (and doesn't redirect to the attacker
-address). `WARN` if baseline and mutated reach the identical status —
-Authorization Servers that only validate redirect URIs after an active
-login session can produce this even when validation is real. `ERROR` ("not
-tested") if the baseline itself gets a generic-rejection status (400 or
-422 — see `_AS_GENERIC_REJECTION_STATUSES`) rather than reaching the
-redirect-URI validation stage.
-
-**Evidence:** Full request/response for both the baseline and mutated probe.
-
-
-### AA-03 — PKCE is enforced (`oauth-pkce-enforced`)
-
-Differential test: baseline is a direct GET to
-`authorization_endpoint` with the registered redirect URI and a valid
-`code_challenge` (same stashed values as AA-02). Mutated is the identical
-request with `code_challenge` omitted entirely.
-
-**Rating logic:** `FAIL` if the mutated request is issued an authorization
-code (`code=` present in the redirect). `PASS` if the mutated request
-reaches a different status than the baseline, or carries an explicit
-`error` parameter. `WARN` if baseline and mutated reach the identical
-status with no error indicator and no issued code — some Authorization
-Servers require an active browser session before validating the request,
-and this probe carries no session cookies, so PKCE enforcement can't be
-conclusively confirmed from a bare request in that case. `ERROR` ("not
-tested") if the baseline itself gets a generic-rejection status.
-
-**Evidence:** Full request/response for both probes.
-
-### AA-04 — Authorization response issuer is validated (`oauth-issuer-response-valid`)
-
-
-Compares the `iss` value from the
-redirect callback (RFC 9207) against `as_metadata["issuer"]`. Reported as
-`WARN`, not `FAIL`, if `iss` is absent — mcp-audit proceeds to gather other
-evidence, but a conforming client should refuse to use the code.
-
-
-### AA-05 — Advertised scopes are narrowly defined (least privilege) (`oauth-scope-surface`)
-
-Matches `scopes_supported` against a
-keyword list associated with broad access (`repo`, `admin`, `write`,
-`delete`, `*`, and similar).
-
-**Limitation:** A keyword heuristic; review flagged scopes individually.
-
----
+**AA-05 — Advertised scopes narrowly defined.**
+- **Matches:** `scopes_supported` against broad-access keywords (`repo`, `admin`, `write`, `delete`, `*`, …).
+- **Limitation:** keyword heuristic; review flagged scopes individually.
 
 ## 3. Credential & Token Risk
 
-The credential the client ends up holding, and its exposure if it leaks: how
-long it lives, how it's transmitted, whether it's verified on every request,
-and whether the agent's own runtime context can expose it.
+The credential the client holds and its exposure if it leaks.
+**Spec:** [Security Considerations](https://modelcontextprotocol.io/specification/draft/basic/authorization/security-considerations) (CT-01–08); OWASP NHI Top 10 and credential practice (CT-09–15).
 
+**CT-01 — Access token bound to this resource (audience).**
+- **Checks:** if the token is a JWT, decodes the payload (unverified, read-only) and compares `aud` to the requested `resource`.
+- **Limitation:** MANUAL for opaque tokens (common — e.g. GitHub's), which need introspection or vendor docs to confirm.
 
-**MCP specification:** 
-- [Security Considerations](https://modelcontextprotocol.io/specification/draft/basic/authorization/security-considerations) (CT-01–CT-08)
-- OWASP Non-Human Identity (NHI) Top 10 and credential-handling practice (CT-09–CT-15)
+**CT-02 — Token transmitted via Authorization header only.**
+- **Checks:** `bearer_methods_supported` (falling back to the `WWW-Authenticate` scheme).
+- **Rates:** fails if `query` is an accepted method.
 
-### CT-01 — Access token is bound to this resource (audience binding) (`oauth-resource-bound`)
+**CT-03 — Token integrity verified (tampered-token rejection).**
+- **Sends:** the real token with its last four characters altered; expects 401.
+- **Proves:** the server verifies integrity (e.g. signature) — **not** audience validation (a distinct property CT-01 covers).
+- **Limitation:** a true cross-audience test needs a token from a second resource server, which a single-target run lacks.
 
-If the access token is a JWT, decodes its payload (unverified
-— used only to read the claim, not to establish trust) and compares `aud`
-against the requested `resource`.
+**CT-04 — Invalid/expired tokens rejected on every request.**
+- **Sends:** a token shaped exactly like the real one (same length/segment structure) but with every letter and digit substituted (`_fabricate_invalid_token`) — a rejection proves content validation, not mere header parsing. Distinct from CT-03 (whole value differs, never issued).
+- **Classifies by *why* it was rejected** (`_classify_rejection`), with the body checked before the status:
+  - **PASS** — rejected over the credential: HTTP 401 (RFC 7235: lacked valid credentials), or any status whose body names a token problem (`invalid_token`, `unauthorized`, `bearer`, `expired`, `authorization header`, `badly formatted`, …). Checked first, so GitHub's `HTTP 400: "Authorization header is badly formatted"` is PASS despite the 400.
+  - **n/a (inconclusive)** — rejected for an envelope/routing/server reason that would reject any request (malformed request, wrong method/`Accept`, unknown route, envelope JSON-RPC codes `-32600`/`-32700`/`-32020`, `5xx`); the token was never evaluated. A JSON-RPC `error` inside an HTTP 2xx body is treated the same.
+  - **FAIL** — not rejected: a 2xx with no error — the protected resource was served despite the bad token.
+- **Limitation:** hint lists are heuristic; unrecognized phrasing falls back to n/a, never FAIL.
 
-**Limitation:** Reported as `MANUAL` for opaque (non-JWT) tokens, which are
-common — GitHub's tokens, for example, are not JWTs. Audience binding for an
-opaque token requires server-side confirmation (introspection or vendor
-documentation).
+**CT-05 — Tokens short-lived and refresh tokens rotate.**
+- **Reads:** `expires_in`; if a refresh token was issued, calls `oauth.refresh()` and checks whether the returned refresh token differs.
+- **On thresholds:** the ~3600s lifetime cutoff is mcp-audit's own operational heuristic, **not** a spec figure; the rotation half (public clients SHOULD rotate) is a direct spec statement.
+- **Limitation:** MANUAL/WARN if no refresh token. Path 1 (static token): `n/a` — no OAuth response to measure.
 
-### CT-02 — Access token is transmitted via the Authorization header only (`oauth-bearer-header-only`)
+**CT-06 — Granted scope ≤ requested scope.**
+- **Compares:** the token response `scope` against the requested scope.
+- **Limitation:** MANUAL if `scope` is omitted (some servers omit it when granted = requested). Path 1: always MANUAL (no scope was requested).
 
-Checks `bearer_methods_supported` in
-the Protected Resource Metadata, falling back to the `WWW-Authenticate`
-scheme. Fails if `"query"` is an accepted method.
+**CT-07 — Access token not present in tool responses.**
+- **Sends:** invokes up to two eligible tools; fails if any raw response contains the token value.
+- **Limitation:** only samples the responses seen this run.
 
-### CT-03 — Token integrity is verified (tampered-token rejection) (`oauth-token-integrity`)
+**CT-08 — Server does not forward the client's token upstream.** *Doc.*
+- **Limitation:** not black-box verifiable; needs docs/source.
 
-Sends a modified copy of the valid access token (the final
-four characters altered) to the MCP endpoint. Expects HTTP 401.
+**CT-09–15 — Config-file / static-credential handling.** *Doc.* All server types (CT-14 is local-only):
 
-**What this does and does not prove:** rejecting a tampered token
-demonstrates the server verifies token integrity (e.g. signature
-validation) — it does **not** demonstrate audience validation. Those are
-distinct properties: a server can verify a token's signature perfectly and
-still fail to check which resource the token was issued for. CT-01 checks
-audience binding directly (via the `aud` claim); CT-03 does not stand in for
-it.
+| ID | Criterion |
+|----|-----------|
+| CT-09 | Docs recommend OAuth or a short-lived token over a static API key/PAT? |
+| CT-10 | If the agent has filesystem/shell access, can it read the config file holding this credential? Do docs direct it to a keychain/secrets manager/env var? |
+| CT-11 | Credentials short-lived or rotatable, not static and non-expiring? |
+| CT-12 | Rotation/revocation procedure documented? |
+| CT-13 | Read-only mode, tool allow-list, or scoped-credential option available? |
+| CT-14 | (stdio) Do docs state any local process able to spawn the server can invoke every tool? |
+| CT-15 | Distributed package contains no hardcoded key/secret/embedded credential? |
 
-**Limitation:** A genuine cross-audience test would require a token minted
-by a second resource server, which a single-target run does not have. This
-check confirms the server verifies tokens at all, using a tampered copy of
-the real token as the closest available substitute.
-
-### CT-04 — Invalid or expired tokens are rejected on every request (`oauth-token-checked-every-request`)
-
-Sends a bearer token shaped exactly like the real one — same length, same
-punctuation/segment structure (a JWT's dots, a provider's `prefix_`
-convention) — but with every letter and digit substituted
-(`_fabricate_invalid_token`), so a rejection proves the server validates
-the token's content, not merely that it can parse the Authorization header.
-Distinct from CT-03's tampered token (the real token with only its last
-few characters changed, to isolate integrity/signature verification): here
-the whole value is different, and it was never issued at all. The two can
-still land on the same outcome on a server that does no real per-request
-validation — that's expected, not duplication.
-
-Classifies the response by *why* it was rejected, not just its status code
-(`_classify_rejection` in `credential_token_risk.py`), with **the body
-checked before the status code decides anything** — a hint match in the
-body wins even when the status is also generically "malformed request":
-
-- **PASS** — rejected specifically over the token/credential: HTTP 401
-  (which by definition, RFC 7235, means the request lacked valid
-  credentials), or any other status whose body names a token/credential
-  problem (`invalid_token`, `unauthorized`, `bearer`, `expired`,
-  `authorization header`, `badly formatted`, ...). This is checked first,
-  so e.g. GitHub's actual `HTTP 400: "bad request: Authorization header is
-  badly formatted"` classifies as PASS even though 400 is also a generic
-  envelope status — the token-naming phrase in the body takes precedence.
-- **n/a (inconclusive)** — only reached once the above didn't match:
-  rejected for an envelope/shape/routing/server reason that would have
-  rejected any request sent this way, valid token or not (a malformed
-  request, wrong method/`Accept` header, unknown route, an envelope-shaped
-  JSON-RPC error code like `-32600`/`-32700`/`-32020`, a `5xx`) — the token
-  was never actually evaluated, so this is recorded with the real status
-  and reason rather than scored either way. A JSON-RPC `error` object
-  delivered inside an HTTP 2xx body (the MCP idiom) is classified the same
-  way.
-- **FAIL** — not rejected at all: a 2xx response carrying no error, i.e.
-  the server actually served the protected resource despite the bad token.
-
-**Limitation:** the token/credential and envelope hint lists are a
-heuristic read of the response body; a server phrasing a rejection in
-neither vocabulary falls back to n/a (never FAIL) rather than being
-misclassified.
-
-### CT-05 — Access tokens are short-lived and refresh tokens rotate (`oauth-short-lived-refresh`)
-
-Reads `expires_in` from the token response. If a
-`refresh_token` was issued, calls `oauth.refresh()` and checks whether the
-returned `refresh_token` differs from the one submitted.
-
-**Evidence:** `expires_in`, whether rotation was observed.
-
-**On the lifetime threshold:** the MCP specification says access tokens SHOULD
-be short-lived but names no exact duration. mcp-audit uses a rough
-operational heuristic — roughly an hour (3600 seconds) or less — to render
-a PASS/WARN judgment, but that number is mcp-audit's own choice, not a 
-MCP specification requirement. The rotation half of this check (refresh tokens
-SHOULD rotate on each use for public clients) is a direct, unambiguous 
-MCP specification statement with no heuristic involved.
-
-**Limitation:** Reported as `MANUAL`/`WARN` if no refresh token was issued.
-**Under Path 1 (static token):** reports `n/a` immediately — "Static token
-supplied; no OAuth token lifecycle to test" — rather than evaluating
-`expires_in`/refresh at all: a supplied API key has no OAuth token response
-whose lifetime or rotation could be measured, so there is nothing here to
-grade as MANUAL or WARN.
-
-### CT-06 — Granted scope does not exceed the requested scope (`oauth-scope-not-overgranted`)
-
-Compares the token response's `scope` field against the scope requested. Reported as
-`MANUAL` if the token response omits `scope` entirely, which some servers
-do when granted scope equals requested scope.
-
-**Under Path 1 (supplied token):** mcp-audit never requested a scope, so
-there is nothing to compare against — always `MANUAL` with that explanation
-rather than the generic "no scope field" message.
-
-### CT-07 — Access token is not present in tool responses (`oauth-token-not-reflected`)
-
-Invokes up to two eligible tools and checks each raw response body for the literal
-access-token value. Fails on any match.
-
-**Limitation:** Checks only the responses sampled during this run — not a
-guarantee across every tool, code path, or server-side log.
-
-### CT-08 — Server does not forward the client's token upstream (`oauth-no-passthrough`)
-
-Not verifiable by black-box probing; requires reading documentation or
-source to confirm the server obtains its own upstream credentials.
-
-### CT-09 through CT-15 — Config-file / static-credential handling
-
-All apply to every server type (`Server: Remote & Local`, except
-CT-14 which is `Server: Local`).
-
-| ID | Review criterion |
-|----|--------------------------------------------------|
-| CT-09 | Does setup documentation recommend OAuth or a short-lived token over a static API key or personal access token? |
-| CT-10 | If the connected agent has filesystem or shell tool access, can it read the configuration file containing this server's credential? Does documentation direct the credential to a keychain, secrets manager, or environment variable instead? |
-| CT-11 | Are credentials short-lived or rotatable, rather than static and non-expiring? |
-| CT-12 | Is a credential rotation/revocation procedure documented? |
-| CT-13 | Is a read-only mode, tool allow-list, or scoped credential option available? |
-| CT-14 | For stdio: does documentation state that any local process able to spawn the server can invoke every tool it exposes? |
-| CT-15 | Does the distributed package contain no hardcoded API key, client secret, or other embedded credential? |
-
-For **CT-15**, search the package or source repository for patterns such as
-`sk-`, `Bearer `, `api_key=`, `token=`, `password=` in non-test code, and
-confirm any `.env.example` file contains only placeholder values.
-
----
+- For CT-15, search source for `sk-`, `Bearer `, `api_key=`, `token=`, `password=` in non-test code, and confirm `.env.example` holds only placeholders.
 
 ## 4. Tool Safety & Blast Radius
 
-How much the server's tools can do, and what could go wrong if an agent
-uses them unsupervised or is fed adversarial input.
+How much the tools can do, and what could go wrong under adversarial input.
+**Spec:** not spec-defined; least-privilege and prompt-injection practice. All send `tools/list` via `_helpers.fetch_tools_authed` using the run's `--auth` session; tagged `Auth` because most servers require a session to serve it. If served unauthenticated, the check runs and notes "obtained without authentication." If auth is required and absent, returns `n/a`. Local targets: `n/a` (not yet wired).
 
+**TS-01 — No unrestricted-access tools.**
+- **Matches:** tool names/descriptions against keywords (`execute`, `shell`, `bash`, `raw_sql`, `admin`, …).
+- **Limitation:** keyword heuristic; review flagged tools individually.
 
-**MCP specification:** Not spec-defined; based on least-privilege and prompt-injection blast-radius practice.
+**TS-02 — Read/write operations distinguishable.**
+- **Prefers:** the `readOnlyHint` annotation; falls back to name matching (`create`/`delete`/`update` vs `get`/`list`/`read`) only for unannotated tools.
+- **Reports:** both buckets ("N read tools (M via annotation, K via naming)") so a fully-annotated server doesn't read as "0 read tools."
 
-All checks send `tools/list` via `_helpers.fetch_tools_authed`, using a
-`--auth` session in the same run when one exists. These checks are tagged
-`Auth`: most servers require a completed session to serve `tools/list`
-(Supabase does, for example). On a server that happens to serve it
-unauthenticated, the check still runs and simply records "obtained without
-authentication" in its evidence — the Method tag itself doesn't change
-per-server. If the server requires authentication and none is available,
-checks return `n/a`. For local targets, all checks currently return `n/a`
-— the underlying question is server-agnostic (see `docs/RUBRIC.md`'s
-Version section), but local evaluation is not yet wired up.
+**TS-03 — External-content injection surface identifiable.**
+- **Flags:** fetch/browse/crawl names (`web_search`, `fetch_url`, `scrape`), or an external-content parameter (`url`, `uri`, `href`, `link`, `endpoint`) combined with a description naming an untrusted boundary ("arbitrary url", "web page", "the web", "third-party", "internet", …).
+- **Scope:** covers only the clearly-external case. Second-order injection via attacker-planted *first-party* content (a malicious instruction in an issue body that a benign `get_issue` reads back) is out of scope — nothing about the tool looks external.
+- **Limitation:** keyword heuristic; a PASS means no clearly-external surface was found by name/schema, not that none exists.
 
-### TS-01 — No unrestricted-access tools are present (`tool-blast-radius`)
+## 5. Response Quality & Consistency — *planned*
 
+A client can reliably build on a tool's response.
+**Spec:** [Tools](https://modelcontextprotocol.io/specification/draft/server/tools) (RQ-01/02); RQ-03–05 not spec-defined. All `planned`; RQ-03–05 invoke live tools and require `--auth`.
 
-Matches tool names and
-descriptions against a keyword list (`execute`, `shell`, `bash`,
-`raw_sql`, `admin`, and similar).
+**RQ-01 — Tool metadata complete and typed.**
+- **Sends:** `tools/list` (retries authenticated on 401 if a session exists); checks each tool for a non-empty `description` and a typed `inputSchema`.
 
-**Limitation:** A keyword heuristic; review flagged tools individually.
+**RQ-02 — Tools declare structured output.**
+- **Checks:** each tool for a non-empty `outputSchema`.
 
-### TS-02 — Read and write operations are distinguishable (`tool-rw-separation`)
+**RQ-03 — Response structure consistent across tools.**
+- **Sends:** invokes up to two eligible tools; compares the top-level key set of `result`.
+- **Limitation:** a failed call has no shape to compare — MANUAL if any call fails (matching failures are not a "consistent shape"), or if fewer than two eligible tools exist.
 
+**RQ-04 — Errors reported in a consistent format.**
+- **Sends:** invokes one tool with a deliberately invalid argument.
+- **Rates:** PASS for a JSON-RPC `error` with `message`, or a result with `isError: true` + text; else WARN.
 
-Prefers the `readOnlyHint`
-annotation where present; falls back to substring name matching
-(`create`/`delete`/`update`/... for write, `get`/`list`/`read`/... for
-read) only for tools without the annotation.
+**RQ-05 — Responses contain sufficient content.**
+- **Sends:** invokes one tool with valid synthesized arguments; measures text length and `structuredContent` presence.
+- **Limitation:** 40-char length proxy; review near-threshold results.
 
-**Reported counts include both read-detection paths.** A server that
-correctly annotates every read tool with `readOnlyHint` will show 0 tools
-matched by the naming heuristic — that's the annotation doing its job, not
-a missed detection. The result text reports both buckets explicitly ("N
-read tool(s) (M via readOnlyHint annotation, K via naming convention)")
-rather than only the naming-heuristic count, so a fully-annotated server
-doesn't misleadingly read as "0 read tools detected."
+## 6. API / Surface Fidelity — *planned*
 
-### TS-03 — Tools with an external-content injection surface are identifiable (`tool-injection-surface`)
+The MCP tool surface accurately represents the underlying product.
+**Spec:** not spec-defined.
 
-Flags tools matching fetch/browse/crawl name patterns (`web_search`,
-`fetch_url`, `scrape`) or whose input schema includes a parameter commonly
-carrying external content (`url`, `uri`, `href`, `link`, `endpoint`)
-combined with a description that names an untrusted external boundary
-("arbitrary url", "web page", "the web", "third-party", "internet", …).
-
-**Scope:** this is a name/description/schema keyword heuristic, and by
-design only covers the clearly-external case — a tool that fetches an
-arbitrary or user-supplied URL, or crawls/searches the open web.
-Second-order prompt injection via attacker-planted *first-party* content
-(a malicious instruction hidden inside an issue body, comment, or email
-that a benign-looking tool like `get_issue` reads back into the agent's
-context) cannot be detected this way, since nothing about that tool's
-name, description, or schema looks external. That case is out of scope
-for automated detection and needs manual review of what each tool's
-response actually contains.
-
-**Limitation:** A keyword heuristic; confirm manually whether a flagged
-tool's input can actually carry content into the agent's context, and
-don't rely on a PASS here to mean the server has no injection surface at
-all — only that no *clearly-external* one was found by name/schema.
-
----
-
-## 5. Response Quality & Consistency
-
-A client can reliably build software around a tool's response —
-typed enough to parse, consistent enough to reuse one code path across
-tools, and informative enough on both success and failure to act on.
-
-
-**MCP specification:** [Tools](https://modelcontextprotocol.io/specification/draft/server/tools) (RQ-01, RQ-02); RQ-03–05 are not spec-defined.
-
-All checks in this section are `planned`. RQ-03 through RQ-05 additionally
-invoke live tools under the invocation policy described above and require
-`--auth`.
-
-### RQ-01 — Tool metadata is complete and typed (`discovery-tool-metadata-clarity`)
-
-
-
-
-Sends `tools/list`. If the unauthenticated request returns
-401 and a `--auth` session exists in the same run, retries authenticated —
-if it instead succeeds unauthenticated, evidence notes "obtained without
-authentication" (see the §4 note above; the same policy applies here).
-Checks each tool for a non-empty `description` and an `inputSchema` with
-typed properties.
-
-**Evidence:** Total tool count, tools missing a description or typed schema.
-
-### RQ-02 — Tools declare structured output (`response-structured-output`)
-
-
-
-
-Checks each tool in `tools/list` for a non-empty
-`outputSchema`.
-
-**Evidence:** Tools with and without a declared output schema.
-
-### RQ-03 — Response structure is consistent across tools (`response-shape-consistency`)
-
-
-
-
-Selects up to two tools eligible under the invocation policy,
-invokes each, and compares the top-level key set of the `result` object (or
-its type, if not an object).
-
-**Evidence:** Tool names invoked, top-level structure of successful
-responses, and a `failed_calls` map for any that didn't return one.
-
-**A failed call is not a "consistent shape."** If a sampled call errors
-(non-200, or a body that doesn't parse), it has no top-level shape to
-compare — two tools that both errored with the same status are evidence
-that neither call produced a real response, not evidence of a unified
-format. Reported as `MANUAL` whenever any call fails, rather than treating
-matching failure strings as a passing comparison.
-
-**Limitation:** Reported as `MANUAL` if fewer than two eligible tools exist.
-
-### RQ-04 — Errors are reported in a consistent format (`response-error-format`)
-
-
-
-
-Invokes one eligible tool with a deliberately invalid
-argument (an incorrect type on a required field, or an unrecognized
-parameter if the tool has no required fields) and inspects how the failure
-is reported: a JSON-RPC `error` object with a `message` field, or a result
-with `isError: true` and text content — either is reported as `PASS`;
-neither is `WARN`.
-
-**Evidence:** Tool invoked, arguments sent, error format detected.
-
-### RQ-05 — Responses contain sufficient content to act on (`response-descriptive`)
-
-
-
-
-Invokes one eligible tool with valid synthesized arguments and
-measures the returned text length and presence of `structuredContent`.
-
-**Evidence:** Tool invoked, content length, presence of structured content.
-
-**Limitation:** Uses a length threshold (40 characters) as a proxy for
-sufficiency; review results near the threshold manually.
-
----
-
-## 6. API / Surface Fidelity
-
-The set of operations exposed as MCP tools accurately represents
-what the underlying product can do — no silently missing capability, no
-undocumented surface area.
-
-
-**MCP specification:** Not spec-defined.
-
-### SF-01 — MCP tool surface corresponds to the underlying API (`discovery-api-parity-gap`)
-
-
-
-
-List every tool name from `tools/list` (RQ-01). Compare
-against the vendor's published REST or GraphQL API reference. Record each
-operation present in the underlying API with no corresponding MCP tool (a
-capability the agent cannot reach through MCP), and each MCP tool with no
-corresponding documented API operation (surface area outside the vendor's
-documented behavior, versioning, and support guarantees).
-
-**Rationale:** An MCP server built on top of an existing API can under- or
-over-expose that API's capability surface without any protocol-level
-violation. Neither case is detectable from MCP traffic alone; both require
-the vendor's API reference as an independent source of truth, which is why
-this is a `Doc` check rather than a `Probe` or `Auth` one — it can't be
-answered by talking to the target server alone.
-
----
+**SF-01 — Tool surface corresponds to the underlying API.** *Doc.*
+- **Compares:** tool names (from RQ-01) against the vendor's published REST/GraphQL reference, recording API operations with no MCP tool (unreachable capability) and MCP tools with no documented operation (undocumented surface).
+- **Why Doc:** requires the vendor's API reference as an independent source of truth, so it can't be answered from MCP traffic alone.
 
 ## 7. Transport & Protocol Plumbing
 
-The wire-level soundness of the transport itself — the checks that apply to
-the literal first request a client makes and to every request thereafter.
+Wire-level soundness of the transport — the first request and every one after.
+**Spec:** [Streamable HTTP](https://modelcontextprotocol.io/specification/draft/basic/transports/streamable-http). All require a live HTTP endpoint (n/a for stdio), except TR-07.
 
+**TR-01 — Foreign `Origin` rejected.** *Differential.*
+- **Sends:** baseline `tools/list` three ways — no `Origin`, same-origin, and `Origin: http://evil.attacker.example.com`. The first non-hostile variant to pass body/header validation is the reference.
+- **Rates:** PASS if the foreign request gets 403; FAIL if it reaches the reference's exact status; WARN if rejected but not with 403; not-tested if neither non-hostile variant reaches validation.
+- **Evidence:** full request/response for all three variants.
 
-**MCP specification:** [Streamable HTTP](https://modelcontextprotocol.io/specification/draft/basic/transports/streamable-http)
+**TR-02 — Every evaluated endpoint uses HTTPS.**
+- **Checks:** the MCP endpoint's scheme, plus every endpoint in discovered AS metadata (`authorization_endpoint`, `token_endpoint`, `registration_endpoint`, `revocation_endpoint`, `introspection_endpoint`, `jwks_uri`, `issuer`).
+- **Limitation:** checks only URLs present in target/metadata, not redirects or split-traffic configs.
 
-All checks require a live HTTP endpoint and are not applicable to
-stdio-only targets (except TR-07, which is about how a local server binds
-its own HTTP listener).
+**TR-04 — Mismatched protocol-version header rejected.** *Differential.*
+- **Baseline:** correct `MCP-Protocol-Version`.
+- **Mutated:** header changed to `2099-01-01`, body version left alone (isolates header/body version consistency).
+- **Rates:** PASS for `400` + `-32020` (`HeaderMismatch`); FAIL if identical status; WARN for `400` with a different code or any other status; not-tested on a failed baseline.
+- **Evidence:** full request/response for both probes.
 
-### TR-01 — Requests with a foreign Origin header are rejected (`transport-foreign-origin-rejected`)
+**TR-05 — Header/body mismatches rejected.** *Differential.*
+- **Baseline:** `Mcp-Method: tools/list` matching the body.
+- **Mutated:** `Mcp-Method: resources/read` while the body still says `tools/list`.
+- **Rates:** same PASS/FAIL/WARN/not-tested structure as TR-04, expecting `400` + `-32020`.
+- **Evidence:** full request/response for both probes.
 
+**TR-07 — Local servers bind to localhost only.** *Doc.*
+- **Reviewed:** from startup flags or docs for the default bind address.
 
-
-
-Sends the baseline `tools/list` request three ways: with no
-`Origin` header, with a same-origin `Origin` (the target's own
-scheme+host), and with `Origin: http://evil.attacker.example.com`. The
-first of the two non-hostile variants that reaches past body/header
-validation (see the differential-testing note above) becomes the reference
-point.
-
-**Rating logic:** `PASS` if the foreign-Origin request gets HTTP 403.
-`FAIL` if it reaches the exact same status as the reference. `WARN` if it's
-rejected but not with 403. `ERROR` ("not tested") if even both non-hostile
-variants fail to reach the validation stage.
-
-**Evidence:** Full request/response for all three variants.
-
-### TR-02 — Every evaluated endpoint uses HTTPS (`transport-https`)
-
-
-
-
-Checks the configured MCP endpoint's scheme, then, if
-Authorization Server metadata was discovered (CD-03), checks the scheme of
-every endpoint it lists (`authorization_endpoint`, `token_endpoint`,
-`registration_endpoint`, `revocation_endpoint`, `introspection_endpoint`,
-`jwks_uri`, `issuer`). A single check covering every endpoint involved in
-the evaluation, rather than separate checks per endpoint category.
-
-**Evidence:** Scheme of each endpoint checked.
-
-**Limitation:** Checks only the URLs present in the configured target and
-discovered metadata, not HTTP-to-HTTPS redirects or split-traffic
-configurations.
-
-### TR-04 — Mismatched protocol-version header is rejected (`transport-version-header-enforced`)
-
-
-
-
-Baseline: the `tools/list` request with a matching, correct
-`MCP-Protocol-Version` header. Mutated: the identical request with the
-header changed to `2099-01-01` — the body's declared version is left
-alone, so this isolates header/body *version* consistency specifically.
-
-**Rating logic:** `PASS` if the mutated request gets `400` with JSON-RPC
-error `-32020` (`HeaderMismatch`). `FAIL` if it reaches the identical
-status as the baseline. `WARN` for a `400` with a different error code, or
-any other status. `ERROR` ("not tested") if the baseline itself doesn't
-reach the validation stage.
-
-**Evidence:** Full request/response for both the baseline and the mutated probe.
-
-### TR-05 — Header/body mismatches are rejected (`transport-header-body-consistency`)
-
-
-
-
-Baseline: the `tools/list` request with `Mcp-Method:
-tools/list` matching the body. Mutated: the identical request with
-`Mcp-Method: resources/read` — a real, different MCP method — while the
-body still declares `tools/list`.
-
-**Rating logic:** Same PASS/FAIL/WARN/ERROR structure as TR-04, expecting
-`400` + `-32020` on the mutated request.
-
-**Evidence:** Full request/response for both probes.
-
-### TR-07 — Local servers bind to localhost only (`transport-localhost-binding`)
-
-
-
-Reviewed from startup flags or documentation for the default bind address.
-
-### TR-08 — Unsupported protocol versions are rejected with a supported-version list (`transport-unsupported-version-error`)
-
-
-
-
-Baseline: the `tools/list` request with the real, current
-protocol version consistently in both header and body. Mutated: the
-identical request with the version changed to `1900-01-01` — consistently,
-in *both* header and body, so this isolates version *negotiation* rather
-than re-testing TR-05's header/body *consistency*.
-
-**Rating logic:** `PASS` if the mutated request gets JSON-RPC error
-`-32022` (`UnsupportedProtocolVersionError`) with `data.supported` listing
-real versions. `FAIL` if it reaches the identical status as the baseline.
-`WARN` for `-32022` with no `data.supported`, or any other mismatch.
-`ERROR` ("not tested") if the baseline itself doesn't reach the validation
-stage.
-
-**Evidence:** Full request/response for both probes.
-
+**TR-08 — Unsupported protocol versions rejected with a supported-version list.** *Differential.*
+- **Baseline:** real version consistently in header and body.
+- **Mutated:** version changed to `1900-01-01` consistently in *both* header and body (isolates version negotiation, not TR-05's consistency).
+- **Rates:** PASS for JSON-RPC `-32022` (`UnsupportedProtocolVersionError`) with `data.supported` listing real versions; FAIL if identical status; WARN for `-32022` without `data.supported` or any other mismatch; not-tested on a failed baseline.
+- **Evidence:** full request/response for both probes.

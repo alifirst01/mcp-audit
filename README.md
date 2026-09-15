@@ -2,7 +2,7 @@
 
 A security posture evaluator for remote [Model Context Protocol](https://modelcontextprotocol.io) servers. It connects to an MCP server the way a real client would, runs a set of spec-referenced checks against its authorization, transport, token, and tool-exposure behavior, and reports each result with the evidence behind it.
 
-It is **read-only and non-destructive**. It sends the requests a conforming client sends, plus a small set of deliberately malformed variants used to test whether the server rejects them. It never fuzzes, floods, or attempts exploitation.
+It is **read-only and non-destructive**. It sends the requests a conforming client sends, plus a small set of deliberately malformed variants used to test whether the server rejects them.
 
 ---
 
@@ -48,7 +48,7 @@ Requires Python 3.10+.
 
 ## Usage
 
-Every example writes full evidence with `--out`. Without `--out`, the console shows only each check's summary line and no evidence is saved.
+Every example writes full [evidence](docs/METHODOLOGY.md#evidence) with `--out`. Without `--out`, the console shows only each check's summary line and no evidence is saved.
 
 ### Evaluate one server
 
