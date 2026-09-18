@@ -39,6 +39,8 @@ Each check is evaluated one of three ways, shown in its output as a method:
 
 ```bash
 git clone https://github.com/alifirst01/mcp-audit.git && cd mcp-audit
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -e .
 ```
 
