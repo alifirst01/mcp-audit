@@ -15,7 +15,10 @@ from urllib.parse import urlparse
 from ...core.base import Check, register
 from ...core.models import Rating, SpecLevel
 from ...core.probe import ProbeContext
-from ._helpers import base_url, expected_issuer_from_well_known
+from ._helpers import (
+    base_url, canonicalize_resource, expected_issuer_from_well_known,
+    fetch_prm_doc, well_known_prm_candidates,
+)
 
 _SECTION = "Connection & Discovery"
 
@@ -116,60 +119,74 @@ class DiscoversAuthorizationServer(Check):
             return self._result(Rating.NA, "No URL to test.")
 
         prm_url = target.context.get("prm_url")
-        parsed = urlparse(target.url)
-        origin = f"{parsed.scheme}://{parsed.netloc}"
+        candidates = ([prm_url] if prm_url else []) + well_known_prm_candidates(target.url)
+        doc, cand = fetch_prm_doc(ctx, candidates)
 
-        candidates = []
-        if prm_url:
-            candidates.append(prm_url)
-        if parsed.path and parsed.path not in ("/", ""):
-            candidates.append(
-                f"{origin}/.well-known/oauth-protected-resource{parsed.path}"
+        if doc is None:
+            return self._result(
+                Rating.FAIL,
+                f"No Protected Resource Metadata document was found at any of the "
+                f"standard locations tried ({'; '.join(candidates)}). An agent with no "
+                f"prior knowledge of this server has no standards-based way to find "
+                f"out which Authorization Server (the service that actually issues "
+                f"login tokens) to use.",
+                {"tried": candidates},
             )
-        candidates.append(f"{origin}/.well-known/oauth-protected-resource")
 
-        for cand in candidates:
-            r = ctx.get(cand)
-            if r.status == 200:
-                try:
-                    doc = r.json()
-                except Exception:
-                    continue
-                if "authorization_servers" not in doc:
-                    continue
-                target.context["prm_doc"] = doc
-                target.context["prm_doc_url"] = cand
-                auth_servers = doc.get("authorization_servers", [])
-                scopes = doc.get("scopes_supported", [])
-                scope_note = (
-                    f"{len(scopes)} permission scope(s) advertised: {', '.join(scopes[:6])}"
-                    + ("..." if len(scopes) > 6 else "")
-                    if scopes else "no permission scopes listed"
-                )
-                return self._result(
-                    Rating.PASS,
-                    f"Found a Protected Resource Metadata document at {cand} — it "
-                    f"names {len(auth_servers)} Authorization Server(s) "
-                    f"({', '.join(auth_servers[:3])}) and {scope_note}. A scope is "
-                    f"a named permission an agent can be granted (e.g. "
-                    f"'read:issues') — the fewer and narrower the scopes, the less "
-                    f"an agent can do if its token leaks.",
-                    {
-                        "url": cand,
-                        "authorization_servers": auth_servers,
-                        "scopes_supported": scopes,
-                        "bearer_methods_supported": doc.get("bearer_methods_supported"),
-                    },
-                )
+        target.context["prm_doc"] = doc
+        target.context["prm_doc_url"] = cand
+        auth_servers = doc.get("authorization_servers", [])
+        scopes = doc.get("scopes_supported", [])
+        scope_note = (
+            f"{len(scopes)} permission scope(s) advertised: {', '.join(scopes[:6])}"
+            + ("..." if len(scopes) > 6 else "")
+            if scopes else "no permission scopes listed"
+        )
+
+        # RFC 9728 §2: the document's own `resource` field MUST identify the
+        # protected resource it describes. Compare canonicalized, not raw —
+        # a trailing slash or explicit default port shouldn't read as a
+        # mismatch.
+        declared_resource = doc.get("resource")
+        declared_resource_canonical = (
+            canonicalize_resource(declared_resource) if declared_resource else None
+        )
+        endpoint_canonical = canonicalize_resource(target.url)
+        resource_mismatch = bool(declared_resource) and (
+            declared_resource_canonical != endpoint_canonical
+        )
+
+        evidence = {
+            "url": cand,
+            "authorization_servers": auth_servers,
+            "scopes_supported": scopes,
+            "bearer_methods_supported": doc.get("bearer_methods_supported"),
+            "declared_resource": declared_resource,
+            "declared_resource_canonical": declared_resource_canonical,
+            "endpoint_canonical": endpoint_canonical,
+        }
+
+        if resource_mismatch:
+            return self._result(
+                Rating.WARN,
+                f"Found a Protected Resource Metadata document at {cand}, "
+                f"but its 'resource' field ({declared_resource!r}) does not "
+                f"canonicalize to the same value as the endpoint it "
+                f"describes ({target.url!r}) — an agent relying on this "
+                f"document to confirm which resource a token is bound to "
+                f"could be pointed at the wrong one.",
+                evidence,
+            )
 
         return self._result(
-            Rating.FAIL,
-            f"No Protected Resource Metadata document was found at any of the "
-            f"standard locations tried ({'; '.join(candidates)}). An agent with no "
-            f"prior knowledge of this server has no standards-based way to find "
-            f"out which Authorization Server (the service that actually issues "
-            f"login tokens) to use.",
-            {"tried": candidates},
+            Rating.PASS,
+            f"Found a Protected Resource Metadata document at {cand} — it "
+            f"names {len(auth_servers)} Authorization Server(s) "
+            f"({', '.join(auth_servers[:3])}) and {scope_note}. A scope is "
+            f"a named permission an agent can be granted (e.g. "
+            f"'read:issues') — the fewer and narrower the scopes, the less "
+            f"an agent can do if its token leaks.",
+            evidence,
         )
 
 
@@ -369,12 +386,38 @@ class LoginPointer(Check):
         r = ctx.get(target.url)
         wa = r.headers.get("www-authenticate", "")
         if not wa:
+            # No in-band pointer, but that isn't necessarily fatal to
+            # discovery: the well-known path (CD-02) is the documented
+            # fallback. Probe it here (cached, so CD-02 doesn't re-fetch)
+            # rather than assuming the worst case in the wording.
+            well_known_candidates = well_known_prm_candidates(target.url)
+            doc, well_known_url = fetch_prm_doc(ctx, well_known_candidates)
+            evidence = {
+                "endpoint_tested": target.url,
+                "well_known_tried": well_known_candidates,
+                "well_known_resolved": doc is not None,
+                "well_known_url": well_known_url,
+            }
+            if doc is not None:
+                return self._result(
+                    Rating.WARN,
+                    f"{target.url} carries no WWW-Authenticate header on its 401 "
+                    f"response, so an agent has no in-band pointer to where it "
+                    f"should log in and must fall back to probing the "
+                    f"well-known path directly. That fallback did resolve — a "
+                    f"Protected Resource Metadata document was found at "
+                    f"{well_known_url} (see CD-02) — so discovery still "
+                    f"succeeds, just without the in-band shortcut.",
+                    evidence,
+                )
             return self._result(
                 Rating.WARN,
                 f"{target.url} carries no WWW-Authenticate header on its 401 "
-                f"response, so an agent has no in-band pointer to where it should "
-                f"log in — it would have to guess or consult documentation.",
-                {"endpoint_tested": target.url},
+                f"response, and the well-known fallback "
+                f"({'; '.join(well_known_candidates)}) did not resolve either "
+                f"— an agent has no in-band pointer and no discoverable "
+                f"fallback; it would have to guess or consult documentation.",
+                evidence,
             )
         m = re.search(r'resource_metadata="([^"]+)"', wa)
         if m:
@@ -420,39 +463,15 @@ class DualDiscoveryPath(Check):
             return self._result(Rating.NA, "No URL to test.")
 
         prm_url_from_header = target.context.get("prm_url")
-        parsed = urlparse(target.url)
-        origin = f"{parsed.scheme}://{parsed.netloc}"
+        well_known_candidates = well_known_prm_candidates(target.url)
 
-        well_known_candidates = []
-        if parsed.path and parsed.path not in ("/", ""):
-            well_known_candidates.append(
-                f"{origin}/.well-known/oauth-protected-resource{parsed.path}"
-            )
-        well_known_candidates.append(f"{origin}/.well-known/oauth-protected-resource")
-
-        well_known_ok = False
-        well_known_url = None
-        for cand in well_known_candidates:
-            r = ctx.get(cand)
-            if r.status == 200:
-                try:
-                    doc = r.json()
-                    if "authorization_servers" in doc:
-                        well_known_ok = True
-                        well_known_url = cand
-                        break
-                except Exception:
-                    pass
+        _, well_known_url = fetch_prm_doc(ctx, well_known_candidates)
+        well_known_ok = well_known_url is not None
 
         header_ok = False
         if prm_url_from_header:
-            r = ctx.get(prm_url_from_header)
-            if r.status == 200:
-                try:
-                    doc = r.json()
-                    header_ok = "authorization_servers" in doc
-                except Exception:
-                    pass
+            _, matched = fetch_prm_doc(ctx, [prm_url_from_header])
+            header_ok = matched is not None
 
         evidence = {
             "prm_url_from_www_authenticate_header": prm_url_from_header,

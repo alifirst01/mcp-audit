@@ -20,8 +20,8 @@ from ...core.models import Rating, SpecLevel
 from ...core.probe import ProbeContext
 from ...core import oauth as oauth_module
 from ._helpers import (
-    auth_method_label, decode_jwt_payload, parse_jsonrpc_message, request_evidence,
-    scope_evidence,
+    auth_method_label, canonicalize_resource, decode_jwt_payload, parse_jsonrpc_message,
+    request_evidence, resources_match, scope_evidence,
 )
 
 _SECTION = "Credential & Token Risk"
@@ -150,6 +150,7 @@ class ResourceBoundToken(Check):
         session = ctx.auth_session
         if not session:
             return self._result(Rating.NA, "No completed login session.")
+        resource_canonical = canonicalize_resource(session.resource)
         claims = decode_jwt_payload(session.access_token)
         if claims is None:
             return self._result(
@@ -158,14 +159,20 @@ class ResourceBoundToken(Check):
                 "can't be read client-side. This was requested with "
                 f"resource={session.resource!r} (RFC 8707) — confirm audience "
                 "binding server-side, e.g. via token introspection.",
-                {"resource_requested": session.resource, "auth_method": auth_method_label(ctx),
-                 **scope_evidence(ctx)},
+                {"resource_requested": session.resource,
+                 "resource_requested_canonical": resource_canonical,
+                 "auth_method": auth_method_label(ctx), **scope_evidence(ctx)},
             )
         aud = claims.get("aud")
         aud_list = aud if isinstance(aud, list) else [aud] if aud else []
-        evidence = {"resource_requested": session.resource, "aud_claim": aud,
-                    "auth_method": auth_method_label(ctx), **scope_evidence(ctx)}
-        matches = any(session.resource and (a == session.resource or session.resource.startswith(a)) for a in aud_list if a)
+        evidence = {
+            "resource_requested": session.resource,
+            "resource_requested_canonical": resource_canonical,
+            "aud_claim": aud,
+            "aud_claim_canonical": [canonicalize_resource(a) for a in aud_list if a],
+            "auth_method": auth_method_label(ctx), **scope_evidence(ctx),
+        }
+        matches = any(resources_match(a, session.resource) for a in aud_list if a)
         if matches:
             return self._result(
                 Rating.PASS,

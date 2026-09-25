@@ -73,7 +73,8 @@ A client with no prior knowledge can learn that login is required, discover its 
 
 **CD-02 — Protected Resource Metadata is published.**
 - **Sends:** fetches PRM, trying in order — the header-pointer URL, `/.well-known/oauth-protected-resource<path>` (RFC 9728 §4.2), then root.
-- **Evidence:** contents, URL, Authorization Server(s), advertised scopes.
+- **Verifies:** the document's own `resource` field (RFC 9728 §2) canonicalizes (`_helpers.canonicalize_resource` — lowercase scheme/host, default port stripped, no trailing slash) to the same value as the endpoint it describes; WARN on a genuine mismatch, not a formatting difference.
+- **Evidence:** contents, URL, Authorization Server(s), advertised scopes, `declared_resource`/`declared_resource_canonical`, `endpoint_canonical`.
 
 **CD-03 — Authorization Server metadata is published.**
 - **Sends:** reads `authorization_servers[0]` from PRM; tries RFC 8414 path-insertion, OIDC path-insertion, and OIDC path-appending in spec priority.
@@ -85,7 +86,8 @@ A client with no prior knowledge can learn that login is required, discover its 
 
 **CD-05 — 401 includes a resource-metadata pointer.**
 - **Reads:** `WWW-Authenticate` from the cached CD-01 response; extracts `resource_metadata`.
-- **Evidence:** header value, extracted URL.
+- **When the header is missing:** WARN either way, but the wording reflects whether the well-known fallback (CD-02) actually resolves — probed here directly (`_helpers.well_known_prm_candidates`/`fetch_prm_doc`, cached so CD-02 doesn't re-fetch) rather than assumed. If it resolves, the detail says discovery still succeeds via the fallback, just without the in-band shortcut; only when the fallback *also* fails does it say the agent would have to guess or consult documentation.
+- **Evidence:** header value, extracted URL, `well_known_tried`/`well_known_resolved`/`well_known_url`.
 
 **CD-06 — Metadata reachable via both discovery paths.**
 - **Verifies:** the header-pointer path and the well-known path independently resolve; passes only if both do.
@@ -133,7 +135,8 @@ The credential the client holds and its exposure if it leaks.
 **Spec:** [Security Considerations](https://modelcontextprotocol.io/specification/draft/basic/authorization/security-considerations) (CT-01–08); OWASP NHI Top 10 and credential practice (CT-09–15).
 
 **CT-01 — Access token bound to this resource (audience).**
-- **Checks:** if the token is a JWT, decodes the payload (unverified, read-only) and compares `aud` to the requested `resource`.
+- **Checks:** if the token is a JWT, decodes the payload (unverified, read-only) and compares `aud` to the requested `resource`, canonicalized (`_helpers.resources_match`) — an `aud`/resource pair differing only by trailing slash, scheme/host case, or an explicit default port still matches; an `aud` naming an origin that's a canonical prefix of the resource (e.g. `https://api.example.com` vs `.../mcp`) also matches.
+- **Evidence:** both raw and canonical forms (`resource_requested`/`_canonical`, `aud_claim`/`_canonical`).
 - **Limitation:** MANUAL for opaque tokens (common — e.g. GitHub's), which need introspection or vendor docs to confirm.
 
 **CT-02 — Token transmitted via Authorization header only.**

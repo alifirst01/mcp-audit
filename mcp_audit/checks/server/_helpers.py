@@ -109,6 +109,78 @@ def base_url(url: str) -> str:
     return f"{p.scheme}://{p.netloc}"
 
 
+def well_known_prm_candidates(url: str) -> list[str]:
+    """Well-known Protected Resource Metadata URLs to try for `url`, in RFC
+    9728 §4.2 priority order: the path-preserving variant first (if `url`
+    has a non-root path), then the bare-origin fallback. Shared by every
+    check that needs to know whether the well-known path resolves,
+    independent of whatever the WWW-Authenticate header does or doesn't say."""
+    parsed = urlparse(url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    candidates = []
+    if parsed.path and parsed.path not in ("/", ""):
+        candidates.append(f"{origin}/.well-known/oauth-protected-resource{parsed.path}")
+    candidates.append(f"{origin}/.well-known/oauth-protected-resource")
+    return candidates
+
+
+def fetch_prm_doc(ctx, candidates: list[str]) -> tuple[dict | None, str | None]:
+    """The first candidate URL returning a 200 with a JSON body containing
+    `authorization_servers`, as (doc, url) — or (None, None). `ctx.get`
+    caches per URL, so probing the same candidate from more than one check
+    costs no extra network round trip."""
+    for cand in candidates:
+        r = ctx.get(cand)
+        if r.status != 200:
+            continue
+        try:
+            doc = r.json()
+        except Exception:
+            continue
+        if isinstance(doc, dict) and "authorization_servers" in doc:
+            return doc, cand
+    return None, None
+
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def canonicalize_resource(url: str) -> str:
+    """Canonical form of a resource/audience URI for comparison (RFC 8707
+    resource-indicator guidance): lowercase scheme and host, an explicit
+    default port stripped, no fragment, and a non-root path with no
+    trailing slash. Two URIs differing only in case, an explicit :443/:80,
+    or a trailing slash must compare equal — otherwise a real audience
+    match is missed, or two different resources are wrongly treated as
+    the same one. "" for an empty/unparseable input, so two absent values
+    compare equal to each other but never to a real URI."""
+    if not url:
+        return ""
+    p = urlparse(url)
+    host = (p.hostname or "").lower()
+    scheme = p.scheme.lower()
+    port = p.port
+    if port is not None and _DEFAULT_PORTS.get(scheme) == port:
+        port = None
+    netloc = f"{host}:{port}" if port is not None else host
+    path = p.path or "/"
+    if path != "/" and path.endswith("/"):
+        path = path.rstrip("/")
+    return urlunparse((scheme, netloc, path, "", p.query, ""))
+
+
+def resources_match(a: str, b: str) -> bool:
+    """True if `a` and `b` name the same resource once canonicalized, or
+    one canonicalizes to a prefix of the other (an audience naming an
+    origin, e.g. `https://api.example.com`, legitimately covers a deeper
+    resource path like `https://api.example.com/mcp`). Both empty is not a
+    match — there is no resource to compare."""
+    ca, cb = canonicalize_resource(a), canonicalize_resource(b)
+    if not ca or not cb:
+        return False
+    return ca == cb or cb.startswith(ca) or ca.startswith(cb)
+
+
 def tools_list_body(version: str = MCP_VERSION) -> dict:
     """JSON-RPC body for a tools/list request. `version` sets the protocol
     version in `params._meta`; it must match the `MCP-Protocol-Version`
